@@ -1,0 +1,1761 @@
+From 76e3c5383b4ddc5f37a65f1ec47a620aa85b5202 Mon Sep 17 00:00:00 2001
+From: Ari Wilson <ari.wilson@gmail.com>
+Date: Wed, 7 Oct 2026 21:16:51 -0700
+Subject: [PATCH] Add local appointment CSV export workspace
+
+Give staff an inclusive date-range preview and spreadsheet-safe CSV download, with status filters, pagination, and a matching CLI. Keep exports on a separate loopback server and open the database read-only. Document current-catalog price semantics. Refs #1.
+---
+ README.md                   |  64 ++++
+ fernhill/__main__.py        |  40 +-
+ fernhill/exports.py         | 138 +++++++
+ fernhill/reports.py         | 208 +++++++++++
+ fernhill/static/reports.css | 726 ++++++++++++++++++++++++++++++++++++
+ tests/test_export_cli.py    | 112 ++++++
+ tests/test_exports.py       | 167 +++++++++
+ tests/test_reports.py       | 198 ++++++++++
+ 8 files changed, 1651 insertions(+), 2 deletions(-)
+ create mode 100644 fernhill/exports.py
+ create mode 100644 fernhill/reports.py
+ create mode 100644 fernhill/static/reports.css
+ create mode 100644 tests/test_export_cli.py
+ create mode 100644 tests/test_exports.py
+ create mode 100644 tests/test_reports.py
+
+diff --git a/README.md b/README.md
+index 5cf9ec6..d676d5d 100644
+--- a/README.md
++++ b/README.md
+@@ -12,6 +12,7 @@ python3 -m fernhill seed                      # a demo salon with bookings on th
+ python3 -m fernhill serve                     # the booking page on http://localhost:8000/
+ python3 -m fernhill day --date 2026-10-13     # the day sheet
+ python3 -m fernhill reminders --date 2026-10-13
++python3 -m fernhill reports                   # staff exports on http://127.0.0.1:8001/
+ python3 -m unittest                           # the tests
+ ```
+ 
+@@ -24,6 +25,8 @@ python3 -m unittest                           # the tests
+ | `fernhill/web.py` | the booking page and the JSON API |
+ | `fernhill/billing.py` | plans, the 14-day trial, plan-change charges. Changed by hand only. |
+ | `fernhill/db.py` | the SQLite schema |
++| `fernhill/exports.py` | read-only appointment queries and spreadsheet-safe CSVs |
++| `fernhill/reports.py` | the separate local staff export workspace |
+ 
+ ## API
+ 
+@@ -32,4 +35,65 @@ python3 -m unittest                           # the tests
+   or `409 {"error"}` when the time is taken or outside opening hours
+ - `GET /api/appointments?date=2026-10-13` → the day sheet
+ 
++## Appointment exports
++
++Open the staff workspace against an existing salon database:
++
++```sh
++python3 -m fernhill --db fernhill.db reports
++```
++
++Visit **http://127.0.0.1:8001/**. Choose From date, To date, and a status, then
++Preview or Download CSV. Both dates are included. The workspace starts with last
++month; shortcuts also select this month or the last 30 days. The preview shows
++50 appointments per page and counts for the selected range/status. Download always
++includes **all matching appointments**, even when viewing a later preview page.
++Download uses the current form values, so you do not have to press Preview first.
++The form and downloads also work without JavaScript.
++
++This is a separate, read-only staff tool. It opens the database in SQLite read-only
++mode, binds only to `127.0.0.1`, and is not part of the public booking app. It rejects
++remote clients, unexpected Host headers, and cross-site browser requests. There is
++no staff login: anyone with access to this computer can use it. Do not expose this
++server through a proxy or use it as a hosted staff portal. `--port 8002` selects a
++different local port; Ctrl+C stops the server.
++
++For a direct export, without opening a browser:
++
++```sh
++python3 -m fernhill --db fernhill.db export --from 2026-09-01 --to 2026-09-30 --output september-appointments.csv
++```
++
++The destination must be a new file; existing files are never overwritten. Omit
++`--output` to write CSV bytes to standard output. A price explanation is printed
++to standard error so it does not contaminate redirected CSV. `--status` accepts
++`all` (default), `booked`, `done`, or `cancelled`. Missing databases are not created.
++
++The CSV has one row per appointment, ordered by start then appointment ID, with
++these columns: `date,start,end,groomer,client,dog,service,price,status`. Dates are
++`YYYY-MM-DD`; times use the salon's local clock, normally `HH:MM`. The filter uses
++the appointment's start date. `done` is shown as Completed in the workspace.
++Cancelled appointments are included by default. An empty range produces column
++headings with no data rows. Contact details and dog notes are not exported.
++
++**Price means the current service catalog price, not the amount charged or paid.**
++Fernhill does not store historical appointment prices, discounts, tips, taxes, or
++payment records. Editing a service's price also changes the price shown for its
++past appointments. Cancelled appointments keep the listed service price. Use this
++as an appointment handoff, not a payment or revenue ledger.
++
++Files use comma delimiters, standard CSV quoting, CRLF row endings, and UTF-8 with
++a byte-order mark so Excel can recognize accented names. Prices are exact decimal
++numbers without currency symbols. Names that start with a spreadsheet formula
++marker (`=`, `+`, `-`, `@`, including after whitespace) or a tab/newline get a leading
++apostrophe to keep them as text. This apostrophe may be visible in some importers.
++If your spreadsheet application does not detect the format, import the file as
++UTF-8 with comma as the separator. Opening and importing in Excel and Google
++Sheets themselves is not part of the automated test suite.
++
++The staff server has its own endpoints: `GET /` for the form/preview and
++`GET /appointments.csv?start=2026-09-01&end=2026-09-30&status=all` for the download.
++Both return `Cache-Control: no-store`. Invalid, missing, or reversed dates return
++a readable HTTP 400 page. These routes are intentionally absent from `serve`.
++
+ See [ROADMAP.md](ROADMAP.md) for what's next.
+diff --git a/fernhill/__main__.py b/fernhill/__main__.py
+index a130b4a..7eaa428 100644
+--- a/fernhill/__main__.py
++++ b/fernhill/__main__.py
+@@ -1,11 +1,14 @@
+-"""python3 -m fernhill {seed,serve,reminders,day}"""
++"""python3 -m fernhill {seed,serve,reminders,day,reports,export}"""
+ from __future__ import annotations
+ 
+ import argparse
++import contextlib
++import sqlite3
++import sys
+ from datetime import date
+ from wsgiref.simple_server import make_server
+ 
+-from . import db, reminders, scheduling, seed, web
++from . import db, exports, reminders, reports, scheduling, seed, web
+ 
+ 
+ def main(argv: list[str] | None = None) -> None:
+@@ -19,8 +22,41 @@ def main(argv: list[str] | None = None) -> None:
+     r.add_argument("--date", type=date.fromisoformat, required=True)
+     d = sub.add_parser("day", help="print the day sheet")
+     d.add_argument("--date", type=date.fromisoformat, required=True)
++    staff = sub.add_parser("reports", help="open the local staff appointment export workspace")
++    staff.add_argument("--port", type=int, default=8001)
++    export = sub.add_parser("export", help="export appointments as an Excel-friendly CSV")
++    export.add_argument("--from", dest="start", required=True, metavar="YYYY-MM-DD")
++    export.add_argument("--to", dest="end", required=True, metavar="YYYY-MM-DD")
++    export.add_argument("--status", choices=("all", *exports.STATUSES), default="all")
++    export.add_argument("--output", metavar="FILE", help="new CSV file (default: stdout; never overwrites)")
+     args = p.parse_args(argv)
+ 
++    if args.cmd in {"reports", "export"}:
++        try:
++            selection = (exports.Selection.parse(args.start, args.end, args.status)
++                         if args.cmd == "export" else None)
++            if args.cmd == "reports" and not 1 <= args.port <= 65535:
++                p.error("port must be between 1 and 65535")
++            with contextlib.closing(exports.connect_readonly(args.db)) as conn:
++                db.salon(conn)  # Fail before starting a server or writing an empty file.
++                if args.cmd == "reports":
++                    with make_server("127.0.0.1", args.port, reports.make_app(conn)) as server:
++                        print(f"Staff exports: http://127.0.0.1:{args.port}/", flush=True)
++                        print("Local access only. Press Ctrl+C to stop.", flush=True)
++                        server.serve_forever()
++                else:
++                    print(exports.PRICE_NOTE, file=sys.stderr)
++                    output = (open(args.output, "xb") if args.output
++                              else contextlib.nullcontext(sys.stdout.buffer))
++                    with output as stream:
++                        for chunk in exports.csv_chunks(conn, selection):
++                            stream.write(chunk)
++        except KeyboardInterrupt:
++            pass
++        except (OSError, sqlite3.Error, LookupError, ValueError) as exc:
++            p.error(str(exc))
++        return
++
+     conn = db.connect(args.db)
+     if args.cmd == "seed":
+         seed.seed(conn)
+diff --git a/fernhill/exports.py b/fernhill/exports.py
+new file mode 100644
+index 0000000..49c3d48
+--- /dev/null
++++ b/fernhill/exports.py
+@@ -0,0 +1,138 @@
++"""Read-only appointment exports shared by the staff workspace and CLI.
++
++Prices are the current service catalog prices, not historical charges or payments.
++Dates/times use the salon's existing local-time convention.
++"""
++from __future__ import annotations
++
++import csv
++import io
++import re
++import sqlite3
++from dataclasses import dataclass
++from datetime import date
++from pathlib import Path
++from urllib.parse import urlencode
++
++STATUSES = ("booked", "done", "cancelled")
++COLUMNS = ("date", "start", "end", "groomer", "client", "dog", "service", "price", "status")
++PRICE_NOTE = ("Prices are current service catalog prices, not amounts charged or paid. "
++              "Past appointment prices change if you edit the service catalog. "
++              "Cancelled appointments keep their listed price.")
++
++
++def connect_readonly(path: str) -> sqlite3.Connection:
++    """Open an existing database without creating or migrating it."""
++    conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
++    conn.row_factory = sqlite3.Row
++    conn.execute("PRAGMA query_only = ON")
++    return conn
++
++
++def parse_date(value: str, label: str) -> date:
++    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
++        raise ValueError(f"{label} must be a date in YYYY-MM-DD format.")
++    try:
++        return date.fromisoformat(value)
++    except ValueError:
++        raise ValueError(f"{label} must be a valid calendar date.") from None
++
++
++@dataclass(frozen=True)
++class Selection:
++    start: date
++    end: date
++    status: str = "all"
++
++    def __post_init__(self):
++        if self.start > self.end:
++            raise ValueError("From date must be on or before To date.")
++        if self.status not in ("all", *STATUSES):
++            raise ValueError("Status must be all, booked, done, or cancelled.")
++
++    @classmethod
++    def parse(cls, start: str, end: str, status: str = "all") -> Selection:
++        return cls(parse_date(start, "From date"), parse_date(end, "To date"), status)
++
++    @property
++    def query(self) -> str:
++        return urlencode({"start": self.start.isoformat(), "end": self.end.isoformat(),
++                          "status": self.status})
++
++    @property
++    def filename(self) -> str:
++        return f"appointments_{self.start}_{self.end}_{self.status}.csv"
++
++    def where(self) -> tuple[str, list[str]]:
++        # Existing data uses ISO local timestamps. Compare their date portions so
++        # both boundary days are included, including appointments with seconds.
++        clause = "substr(a.start, 1, 10) BETWEEN ? AND ?"
++        params = [self.start.isoformat(), self.end.isoformat()]
++        if self.status != "all":
++            clause += " AND a.status = ?"
++            params.append(self.status)
++        return clause, params
++
++
++def appointments(conn: sqlite3.Connection, selection: Selection, *,
++                 limit: int | None = None, offset: int = 0):
++    """Iterate one row per appointment, including cancelled/done by default."""
++    where, params = selection.where()
++    sql = (
++        "SELECT a.id, a.start, a.end, g.name AS groomer, c.name AS client,"
++        " d.name AS dog, sv.name AS service, sv.price_cents, a.status"
++        " FROM appointments a"
++        " JOIN groomers g ON g.id = a.groomer_id"
++        " JOIN dogs d ON d.id = a.dog_id"
++        " JOIN clients c ON c.id = d.client_id"
++        " JOIN services sv ON sv.id = a.service_id"
++        f" WHERE {where} ORDER BY a.start, a.id"
++    )
++    if limit is not None:
++        sql += " LIMIT ? OFFSET ?"
++        params = [*params, limit, offset]
++    return conn.execute(sql, params)
++
++
++def counts(conn: sqlite3.Connection, selection: Selection) -> dict[str, int]:
++    where, params = selection.where()
++    totals = dict.fromkeys(STATUSES, 0)
++    for row in conn.execute(
++            f"SELECT a.status, COUNT(*) AS n FROM appointments a WHERE {where} GROUP BY a.status",
++            params):
++        totals[row["status"]] = row["n"]
++    return totals
++
++
++def price(cents: int) -> str:
++    """Format money from integer cents without float rounding or currency symbols."""
++    whole, fraction = divmod(abs(cents), 100)
++    return f"{'-' if cents < 0 else ''}{whole}.{fraction:02d}"
++
++
++def spreadsheet_text(value: str) -> str:
++    """Keep user-entered names from being treated as spreadsheet formulas.
++
++    CSV quoting alone does not stop formula evaluation. Prefix risky text with an
++    apostrophe; leave dates, times and numeric price cells in their native format.
++    """
++    if value.startswith(("\t", "\r", "\n")) or value.lstrip().startswith(("=", "+", "-", "@")):
++        return "'" + value
++    return value
++
++
++def csv_chunks(conn: sqlite3.Connection, selection: Selection):
++    """Yield UTF-8 CSV bytes with a BOM for Excel and standard CRLF row endings."""
++    buffer = io.StringIO(newline="")
++    writer = csv.writer(buffer, lineterminator="\r\n")
++    writer.writerow(COLUMNS)
++    yield b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")
++    for row in appointments(conn, selection):
++        buffer.seek(0)
++        buffer.truncate(0)
++        writer.writerow([
++            row["start"][:10], row["start"][11:], row["end"][11:],
++            *(spreadsheet_text(row[key]) for key in ("groomer", "client", "dog", "service")),
++            price(row["price_cents"]), row["status"],
++        ])
++        yield buffer.getvalue().encode("utf-8")
+diff --git a/fernhill/reports.py b/fernhill/reports.py
+new file mode 100644
+index 0000000..63d4854
+--- /dev/null
++++ b/fernhill/reports.py
+@@ -0,0 +1,208 @@
++"""A separate, loopback-only staff workspace. Never mounted in the booking app."""
++from __future__ import annotations
++
++import calendar
++import ipaddress
++import sqlite3
++from datetime import date, timedelta
++from html import escape
++from pathlib import Path
++from urllib.parse import parse_qs
++
++from . import exports
++from .db import salon
++
++PAGE_SIZE = 50
++STATUS_LABELS = {"all": "All statuses", "booked": "Booked", "done": "Completed",
++                 "cancelled": "Cancelled"}
++CSS = Path(__file__).with_name("static").joinpath("reports.css")
++
++
++def month_range(today: date) -> tuple[date, date]:
++    return today.replace(day=1), today.replace(day=calendar.monthrange(today.year, today.month)[1])
++
++
++def default_selection(today: date) -> exports.Selection:
++    last_month_end = today.replace(day=1) - timedelta(days=1)
++    return exports.Selection(last_month_end.replace(day=1), last_month_end)
++
++
++def selections(today: date, status: str):
++    first, last = month_range(today)
++    previous = default_selection(today)
++    return (
++        ("Last month", exports.Selection(previous.start, previous.end, status)),
++        ("This month", exports.Selection(first, last, status)),
++        ("Last 30 days", exports.Selection(today - timedelta(days=29), today, status)),
++    )
++
++
++def date_label(day: date) -> str:
++    return f"{day.strftime('%b')} {day.day}, {day.year}"
++
++
++def table_row(row: sqlite3.Row) -> str:
++    day = date.fromisoformat(row["start"][:10])
++    cells = [
++        f'<time datetime="{day.isoformat()}">{escape(date_label(day))}</time>',
++        f'<span class="time">{escape(row["start"][11:])}–{escape(row["end"][11:])}</span>',
++        escape(row["groomer"]),
++        f'<strong>{escape(row["dog"])}</strong><span class="subtext">{escape(row["client"])}</span>',
++        escape(row["service"]),
++        f'<span class="amount">${exports.price(row["price_cents"])}</span>',
++        f'<span class="badge {escape(row["status"])}">{STATUS_LABELS[row["status"]]}</span>',
++    ]
++    return "<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>"
++
++
++def render(conn: sqlite3.Connection, *, today: date, selection: exports.Selection | None,
++           values: dict[str, str], page: int = 1, error: str = "") -> str:
++    name = escape(salon(conn)["name"])
++    start = escape(values.get("start", ""), quote=True)
++    end = escape(values.get("end", ""), quote=True)
++    status = values.get("status", "all")
++    options = "".join(
++        f'<option value="{key}"{" selected" if key == status else ""}>{label}</option>'
++        for key, label in STATUS_LABELS.items())
++    shortcuts = "".join(
++        f'<a href="/?{escape(item.query, quote=True)}"'
++        f' aria-current="{str(item == selection).lower()}">{label}</a>'
++        for label, item in selections(today, status if status in STATUS_LABELS else "all"))
++    notice = (f'<div class="error" role="alert"><strong>Check your export filters.</strong> '
++              f'{escape(error)}</div>') if error else ""
++    if selection is not None:
++        totals = exports.counts(conn, selection)
++        total = sum(totals.values())
++        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
++        page = min(page, pages)
++        offset = (page - 1) * PAGE_SIZE
++        rows = list(exports.appointments(conn, selection, limit=PAGE_SIZE, offset=offset))
++        summary = f"{date_label(selection.start)} – {date_label(selection.end)}"
++        cards = "".join(
++            f'<div class="stat"><span>{label}</span><strong>{count:,}</strong></div>'
++            for label, count in (("Appointments", total), ("Completed", totals["done"]),
++                                 ("Booked", totals["booked"]), ("Cancelled", totals["cancelled"])))
++        if rows:
++            content = f'''<p class="scroll-hint">Scroll sideways to see all columns →</p><div class="table-wrap" tabindex="0" role="region" aria-label="Appointment preview, scroll for more columns">
++<table><caption class="sr-only">Appointments from {escape(summary)}. Prices are current catalog prices.</caption>
++<thead><tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">Groomer</th>
++<th scope="col">Dog / client</th><th scope="col">Service</th><th scope="col">Listed price</th><th scope="col">Status</th></tr></thead>
++<tbody>{''.join(table_row(row) for row in rows)}</tbody></table></div>'''
++        else:
++            content = '''<div class="empty"><span class="empty-icon" aria-hidden="true">↗</span>
++<h3>No appointments in this range</h3><p>Try another date range or choose All statuses.</p>
++<p>You can still download a CSV with column headings.</p></div>'''
++        navigation = ""
++        if page > 1:
++            navigation += f'<a href="/?{escape(selection.query)}&amp;page={page - 1}" rel="prev">← Previous</a>'
++        if page < pages:
++            navigation += f'<a href="/?{escape(selection.query)}&amp;page={page + 1}" rel="next">Next →</a>'
++        showing = f"Showing {offset + 1}–{offset + len(rows)} of {total:,}" if rows else "0 appointments"
++        preview = f'''<section class="summary" aria-label="Export counts">{cards}</section>
++<section class="preview" aria-labelledby="preview-title">
++<div class="preview-heading"><div><p class="eyebrow">YOUR EXPORT</p><h2 id="preview-title">Appointment preview</h2>
++<p>{escape(summary)} <span aria-hidden="true">·</span> {STATUS_LABELS[selection.status]}</p></div>
++<span class="file-tag">CSV · {total:,} {"row" if total == 1 else "rows"}</span></div>
++{content}<div class="table-footer"><p>{showing}. Download includes all {total:,} matching {"row" if total == 1 else "rows"}.</p>
++<nav aria-label="Preview pages">{navigation}</nav></div></section>'''
++    else:
++        preview = '<section class="empty"><h2>Choose a valid date range to see your appointments.</h2></section>'
++    return f'''<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Appointment exports · {name} · Fernhill</title><link rel="stylesheet" href="/assets/reports.css"></head>
++<body><a class="skip" href="#main">Skip to content</a>
++<header class="topbar"><a class="brand" href="/" aria-label="Fernhill exports home"><span class="brand-mark" aria-hidden="true">f</span>fernhill<span class="brand-divider"></span><span class="workspace">Reports</span></a>
++<div class="salon"><span class="local-dot" aria-hidden="true"></span>{name}<span class="local-label">Local workspace</span></div></header>
++<main id="main"><div class="breadcrumb">Reports <span aria-hidden="true">/</span> Appointments</div>
++<div class="intro"><div><p class="eyebrow">LESS ADMIN. MORE GOOD DOGS.</p><h1>Appointments, ready to share.</h1>
++<p>Take the month off your to-do list. Export your appointments for your bookkeeper.</p></div>
++<span class="intro-mark" aria-hidden="true">↗</span></div>
++<section class="filters" aria-labelledby="filters-title"><div class="filter-title"><h2 id="filters-title">Choose your date range</h2>
++<span>Both dates are included</span></div>{notice}
++<form method="get" action="/" aria-label="Appointment export filters">
++<div class="fields"><div><label for="start">From date</label><input id="start" name="start" type="date" value="{start}" required></div>
++<div><label for="end">To date</label><input id="end" name="end" type="date" value="{end}" required></div>
++<div><label for="status">Appointment status</label><select id="status" name="status">{options}</select></div>
++<div class="actions"><button class="secondary" type="submit">Preview</button><button class="primary" type="submit" formaction="/appointments.csv">Download CSV <span aria-hidden="true">↓</span></button></div></div>
++<div class="filter-bottom"><nav aria-label="Common date ranges">{shortcuts}</nav><span>Local salon time · All groomers</span></div>
++</form></section>{preview}
++<aside class="notes" aria-labelledby="export-notes"><div class="note-symbol" aria-hidden="true">i</div>
++<div><h2 id="export-notes">A clear handoff to your bookkeeper</h2><p>{escape(exports.PRICE_NOTE)}</p>
++<p>Includes date, start, end, groomer, client, dog, service, price and status. UTF-8 CSV for Excel and Google Sheets.
++Names that could be read as formulas get a leading apostrophe.</p></div></aside>
++<footer><span>Fernhill <span aria-hidden="true">/</span> A little less busywork.</span><span>Staff workspace · This computer only</span></footer>
++</main></body></html>'''
++
++
++def local_request(environ) -> bool:
++    """Reject remote clients, DNS rebinding and cross-site browser requests."""
++    try:
++        if not ipaddress.ip_address(environ.get("REMOTE_ADDR", "")).is_loopback:
++            return False
++    except ValueError:
++        return False
++    port = environ.get("SERVER_PORT", "")
++    hosts = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
++    if port == "80":
++        hosts.update({"127.0.0.1", "localhost", "[::1]"})
++    host = environ.get("HTTP_HOST", "").lower()
++    if host not in hosts:
++        return False
++    origin = environ.get("HTTP_ORIGIN")
++    if origin is not None and origin != f"http://{host}":
++        return False
++    return environ.get("HTTP_SEC_FETCH_SITE") not in {"cross-site", "same-site"}
++
++
++def make_app(conn: sqlite3.Connection, *, today: date | None = None):
++    """Create the staff app. The CLI binds it to 127.0.0.1, on a separate port."""
++    def app(environ, start_response):
++        headers = [("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
++                   ("X-Frame-Options", "DENY"), ("Referrer-Policy", "no-referrer"),
++                   ("Content-Security-Policy", "default-src 'none'; style-src 'self'; "
++                    "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")]
++
++        def reply(status, body, content_type="text/plain", extra=()):
++            data = body.encode("utf-8")
++            start_response(status, [*headers, ("Content-Type", content_type + "; charset=utf-8"),
++                                    ("Content-Length", str(len(data))), *extra])
++            return [data]
++
++        if not local_request(environ):
++            return reply("403 Forbidden", "Open this staff workspace directly on this computer.")
++        if environ["REQUEST_METHOD"] != "GET":
++            return reply("405 Method Not Allowed", "Use GET to preview or download appointments.",
++                         extra=[("Allow", "GET")])
++        path = environ.get("PATH_INFO", "/")
++        if path == "/assets/reports.css":
++            return reply("200 OK", CSS.read_text(encoding="utf-8"), "text/css")
++        if path not in {"/", "/appointments.csv"}:
++            return reply("404 Not Found", "Page not found.")
++        current_day = today if today is not None else date.today()
++        values = {}
++        try:
++            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True,
++                             max_num_fields=12)
++            if any(len(v) != 1 for v in query.values()):
++                raise ValueError("Choose one value for each export field.")
++            if set(query) - {"start", "end", "status", "page"}:
++                raise ValueError("Use From date, To date, and Appointment status to choose your export.")
++            values = {k: v[0] for k, v in query.items()}
++            if not values and path == "/":
++                initial = default_selection(current_day)
++                values = {"start": initial.start.isoformat(), "end": initial.end.isoformat(), "status": "all"}
++            selection = exports.Selection.parse(values.get("start", ""), values.get("end", ""),
++                                                 values.get("status", "all"))
++            page = int(values.get("page", "1"))
++            if page < 1:
++                raise ValueError("Preview page must be 1 or greater.")
++        except ValueError as exc:
++            return reply("400 Bad Request", render(conn, today=current_day, selection=None,
++                         values=values, error=str(exc)), "text/html")
++        if path == "/appointments.csv":
++            start_response("200 OK", [*headers, ("Content-Type", "text/csv; charset=utf-8"),
++                           ("Content-Disposition", f'attachment; filename="{selection.filename}"')])
++            return exports.csv_chunks(conn, selection)
++        return reply("200 OK", render(conn, today=current_day, selection=selection,
++                                      values=values, page=page), "text/html")
++    return app
+diff --git a/fernhill/static/reports.css b/fernhill/static/reports.css
+new file mode 100644
+index 0000000..ab084d6
+--- /dev/null
++++ b/fernhill/static/reports.css
+@@ -0,0 +1,726 @@
++:root {
++  color-scheme: light;
++  --ink: #223c35;
++  --muted: #57665e;
++  --green: #275747;
++  --line: #dce2d9;
++  --paper: #fafbf7;
++  --white: #fff;
++  --accent: #e5f0d2;
++}
++* {
++  box-sizing: border-box;
++}
++body {
++  margin: 0;
++  background: var(--paper);
++  color: var(--ink);
++  font:
++    15px/1.5 -apple-system,
++    BlinkMacSystemFont,
++    "Segoe UI",
++    sans-serif;
++}
++a {
++  color: var(--green);
++  text-underline-offset: 3px;
++}
++button,
++input,
++select {
++  font: inherit;
++}
++button,
++a,
++input,
++select {
++  touch-action: manipulation;
++}
++:focus-visible {
++  outline: 3px solid #bd6328;
++  outline-offset: 4px;
++}
++.skip {
++  position: absolute;
++  left: 16px;
++  top: -100px;
++  background: white;
++  padding: 12px;
++  z-index: 2;
++}
++.skip:focus {
++  top: 12px;
++}
++.topbar {
++  height: 86px;
++  padding: 0 max(32px, calc((100vw - 1200px) / 2));
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  border-bottom: 1px solid var(--line);
++  background: #fff;
++}
++.brand {
++  display: flex;
++  gap: 11px;
++  align-items: center;
++  color: var(--ink);
++  text-decoration: none;
++  font-size: 25px;
++  font-weight: 720;
++  letter-spacing: -1px;
++}
++.brand-mark {
++  display: grid;
++  place-content: center;
++  width: 32px;
++  height: 36px;
++  border-radius: 15px 4px 15px 4px;
++  background: var(--green);
++  color: var(--accent);
++  font-family: Georgia, serif;
++  font-size: 32px;
++  font-style: italic;
++  padding-right: 4px;
++}
++.brand-divider {
++  height: 24px;
++  width: 1px;
++  background: var(--line);
++  margin: 0 10px;
++}
++.workspace {
++  font-weight: 500;
++  font-size: 14px;
++  letter-spacing: 0;
++  color: var(--muted);
++}
++.salon {
++  display: flex;
++  gap: 8px;
++  align-items: center;
++  font-weight: 600;
++  font-size: 13px;
++}
++.local-dot {
++  width: 7px;
++  height: 7px;
++  background: #56876c;
++  border-radius: 50%;
++}
++.local-label {
++  font-size: 11px;
++  font-weight: 400;
++  color: var(--muted);
++  border-left: 1px solid var(--line);
++  padding-left: 10px;
++  margin-left: 4px;
++}
++main {
++  max-width: 1264px;
++  margin: 0 auto;
++  padding: 30px 32px 22px;
++}
++.breadcrumb {
++  color: var(--muted);
++  font-size: 12px;
++  display: flex;
++  gap: 11px;
++}
++.breadcrumb span {
++  color: #a1aaa3;
++}
++.intro {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  margin: 35px 0 32px;
++}
++.eyebrow {
++  font-size: 10px;
++  font-weight: 750;
++  letter-spacing: 1.65px;
++  margin: 0 0 9px;
++  color: #506c50;
++}
++h1 {
++  font-size: clamp(28px, 3.3vw, 43px);
++  font-weight: 540;
++  line-height: 1.2;
++  letter-spacing: -1.7px;
++  margin: 0 0 12px;
++}
++.intro p:last-child {
++  margin: 0;
++  color: var(--muted);
++  font-size: 15px;
++}
++.intro-mark {
++  display: grid;
++  place-content: center;
++  flex-shrink: 0;
++  width: 74px;
++  height: 74px;
++  border-radius: 50%;
++  color: #6c815c;
++  background: var(--accent);
++  font-size: 48px;
++  font-weight: 300;
++  transform: rotate(7deg);
++  margin-left: 25px;
++}
++.filters {
++  background: white;
++  border: 1px solid var(--line);
++  border-radius: 12px;
++  padding: 24px 26px 0;
++  box-shadow: 0 3px 7px #18312604;
++}
++.filter-title {
++  display: flex;
++  align-items: center;
++  gap: 20px;
++  justify-content: space-between;
++  margin-bottom: 22px;
++}
++h2 {
++  font-size: 17px;
++  line-height: 1.4;
++  letter-spacing: -0.3px;
++  margin: 0;
++  font-weight: 650;
++}
++.filter-title > span {
++  font-size: 12px;
++  color: var(--muted);
++}
++.fields {
++  display: grid;
++  grid-template-columns: 1fr 1fr 1.15fr auto;
++  align-items: end;
++  gap: 16px;
++}
++label {
++  display: block;
++  font-size: 12px;
++  font-weight: 650;
++  margin-bottom: 7px;
++}
++input,
++select {
++  width: 100%;
++  height: 44px;
++  border: 1px solid #c5cfc5;
++  border-radius: 6px;
++  padding: 9px 12px;
++  min-width: 0;
++  color: var(--ink);
++  background: #fff;
++}
++input:hover,
++select:hover {
++  border-color: #6b826f;
++}
++button {
++  border: 1px solid transparent;
++  min-height: 44px;
++  padding: 10px 17px;
++  border-radius: 6px;
++  font-size: 13px;
++  font-weight: 650;
++  cursor: pointer;
++  white-space: nowrap;
++}
++.primary {
++  background: var(--green);
++  color: #fff;
++}
++.primary:hover {
++  background: #173d30;
++}
++.primary span {
++  font-size: 18px;
++  margin-left: 12px;
++  line-height: 0;
++}
++.secondary {
++  color: var(--ink);
++  background: #fff;
++  border-color: #c5cfc5;
++}
++.secondary:hover {
++  background: #f0f5eb;
++}
++.actions {
++  display: flex;
++  gap: 9px;
++}
++.filter-bottom {
++  border-top: 1px solid #edf0e9;
++  margin-top: 22px;
++  padding: 15px 0;
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  gap: 16px;
++  color: var(--muted);
++  font-size: 11px;
++}
++.filter-bottom nav {
++  display: flex;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++.filter-bottom a {
++  padding: 4px 10px;
++  border-radius: 4px;
++  color: #5a685f;
++  text-decoration: none;
++  font-size: 11px;
++}
++.filter-bottom a:hover {
++  background: #edf3e7;
++}
++.filter-bottom a[aria-current="true"] {
++  background: var(--accent);
++  color: #354d2d;
++  font-weight: 650;
++}
++.summary {
++  display: grid;
++  grid-template-columns: repeat(4, 1fr);
++  margin: 24px 0;
++  gap: 16px;
++}
++.stat {
++  padding: 18px 22px;
++  border: 1px solid var(--line);
++  border-radius: 9px;
++  background: #fff;
++}
++.stat:first-child {
++  background: #edf3e5;
++  border-color: #d8e2cc;
++}
++.stat > span {
++  display: block;
++  font-size: 12px;
++  color: var(--muted);
++  margin-bottom: 4px;
++}
++.stat strong {
++  font-size: 30px;
++  line-height: 1.2;
++  font-weight: 550;
++  letter-spacing: -1px;
++  font-variant-numeric: tabular-nums;
++}
++.preview {
++  border: 1px solid var(--line);
++  border-radius: 12px;
++  overflow: hidden;
++  background: #fff;
++}
++.preview-heading {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  gap: 20px;
++  padding: 22px 26px;
++}
++.preview-heading .eyebrow {
++  margin-bottom: 5px;
++  font-size: 9px;
++}
++.preview-heading h2 {
++  font-size: 19px;
++}
++.preview-heading p:last-child {
++  font-size: 12px;
++  margin: 6px 0 0;
++  color: var(--muted);
++}
++.preview-heading p span {
++  margin: 0 5px;
++}
++.file-tag {
++  display: inline-flex;
++  padding: 5px 11px;
++  border: 1px solid var(--line);
++  border-radius: 5px;
++  font-size: 11px;
++  white-space: nowrap;
++  color: var(--muted);
++}
++.scroll-hint {
++  display: none;
++}
++.table-wrap {
++  overflow-x: auto;
++}
++table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: 12px;
++  min-width: 930px;
++  text-align: left;
++}
++th {
++  padding: 12px 20px;
++  background: #f6f7f3;
++  border-top: 1px solid var(--line);
++  border-bottom: 1px solid var(--line);
++  font-size: 10px;
++  letter-spacing: 0.45px;
++  font-weight: 650;
++  white-space: nowrap;
++  color: #647568;
++}
++td {
++  padding: 16px 20px;
++  border-bottom: 1px solid #edf0e9;
++  vertical-align: middle;
++  max-width: 240px;
++  overflow-wrap: anywhere;
++}
++tr:last-child td {
++  border-bottom: 0;
++}
++td strong {
++  font-weight: 650;
++}
++.subtext {
++  display: block;
++  color: var(--muted);
++  font-size: 11px;
++  margin-top: 3px;
++}
++.time,
++.amount {
++  white-space: nowrap;
++  font-variant-numeric: tabular-nums;
++}
++time {
++  white-space: nowrap;
++}
++.badge {
++  display: inline-block;
++  padding: 3px 8px;
++  border-radius: 4px;
++  font-size: 10px;
++  font-weight: 550;
++  white-space: nowrap;
++}
++.done {
++  background: #e7f0df;
++  color: #416039;
++}
++.booked {
++  background: #e7eef6;
++  color: #3e5c7b;
++}
++.cancelled {
++  background: #f6ebe6;
++  color: #8c593e;
++}
++.table-footer {
++  padding: 15px 26px;
++  border-top: 1px solid var(--line);
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 16px;
++  font-size: 11px;
++  color: var(--muted);
++}
++.table-footer p {
++  margin: 0;
++}
++.table-footer nav {
++  display: flex;
++  gap: 16px;
++  white-space: nowrap;
++}
++.empty {
++  text-align: center;
++  padding: 45px 24px;
++  color: var(--muted);
++}
++.empty-icon {
++  display: inline-grid;
++  place-content: center;
++  width: 40px;
++  height: 40px;
++  background: #edf3e5;
++  border-radius: 50%;
++  color: var(--green);
++  font-size: 24px;
++}
++.empty h3 {
++  font-size: 17px;
++  color: var(--ink);
++  margin-bottom: 7px;
++}
++.empty p {
++  font-size: 13px;
++  margin: 5px 0;
++}
++.notes {
++  display: flex;
++  gap: 14px;
++  padding: 23px 3px 25px;
++  align-items: flex-start;
++  color: var(--muted);
++}
++.note-symbol {
++  display: grid;
++  place-content: center;
++  flex: 0 0 19px;
++  height: 19px;
++  border: 1px solid #a8b6a4;
++  border-radius: 50%;
++  font-size: 12px;
++  font-family: Georgia, serif;
++  font-weight: bold;
++  margin-top: 2px;
++}
++.notes h2 {
++  font-size: 12px;
++  font-weight: 650;
++  color: #526650;
++  letter-spacing: 0;
++}
++.notes p {
++  font-size: 11px;
++  line-height: 1.7;
++  margin: 6px 0 0;
++  max-width: 970px;
++}
++.error {
++  padding: 13px 16px;
++  border: 1px solid #d6a88f;
++  background: #fff3e9;
++  border-radius: 6px;
++  color: #843e23;
++  margin: 0 0 20px;
++  font-size: 13px;
++}
++.error strong {
++  display: block;
++}
++footer {
++  padding-top: 17px;
++  border-top: 1px solid var(--line);
++  display: flex;
++  justify-content: space-between;
++  gap: 20px;
++  font-size: 10px;
++  color: #5d6e5a;
++}
++footer span span {
++  padding: 0 9px;
++  color: #a2aaa0;
++}
++.sr-only {
++  position: absolute;
++  width: 1px;
++  height: 1px;
++  padding: 0;
++  margin: -1px;
++  overflow: hidden;
++  clip: rect(0, 0, 0, 0);
++  white-space: nowrap;
++  border: 0;
++}
++@media (min-width: 1500px) {
++  main {
++    padding-top: 36px;
++  }
++  .intro {
++    margin-top: 42px;
++  }
++}
++@media (max-width: 1000px) {
++  .scroll-hint {
++    display: block;
++    margin: 0;
++    padding: 0 18px 12px;
++    font-size: 11px;
++    color: var(--muted);
++  }
++  .fields {
++    grid-template-columns: 1fr 1fr;
++  }
++  .actions {
++    justify-content: flex-end;
++  }
++  .topbar {
++    padding: 0 24px;
++  }
++  main {
++    padding: 24px;
++  }
++  .intro-mark {
++    width: 62px;
++    height: 62px;
++  }
++  .stat {
++    padding: 16px;
++  }
++}
++@media (max-width: 600px) {
++  .topbar {
++    height: auto;
++    min-height: 78px;
++    gap: 15px;
++    padding: 16px 20px;
++    align-items: flex-start;
++  }
++  .brand {
++    font-size: 21px;
++  }
++  .brand-divider,
++  .workspace {
++    display: none;
++  }
++  .salon {
++    font-size: 11px;
++    max-width: 180px;
++    flex-wrap: wrap;
++    justify-content: flex-end;
++    text-align: right;
++    gap: 5px;
++  }
++  .local-label {
++    border: 0;
++    padding: 0;
++    width: 100%;
++    margin: 0;
++    font-size: 10px;
++  }
++  .local-dot {
++    display: none;
++  }
++  main {
++    padding: 22px 16px;
++  }
++  .intro {
++    margin: 28px 0 24px;
++  }
++  .intro-mark {
++    display: none;
++  }
++  h1 {
++    letter-spacing: -0.8px;
++    font-size: 30px;
++    max-width: 320px;
++  }
++  .intro p:last-child {
++    font-size: 13px;
++    max-width: 330px;
++  }
++  .eyebrow {
++    font-size: 9px;
++  }
++  .filters {
++    padding: 19px 17px 0;
++  }
++  .filter-title {
++    display: block;
++    margin-bottom: 18px;
++  }
++  .filter-title h2 {
++    font-size: 16px;
++  }
++  .filter-title > span {
++    font-size: 10px;
++  }
++  .fields {
++    gap: 14px 10px;
++  }
++  .fields > div:nth-child(3),
++  .actions {
++    grid-column: 1/-1;
++  }
++  .actions button {
++    flex: 1;
++  }
++  .fields input {
++    padding: 8px;
++    font-size: 14px;
++  }
++  .filter-bottom {
++    align-items: flex-start;
++    flex-direction: column;
++    gap: 9px;
++  }
++  .filter-bottom a {
++    padding: 5px 8px;
++  }
++  .filter-bottom > span {
++    padding-left: 8px;
++    font-size: 10px;
++  }
++  .summary {
++    grid-template-columns: 1fr 1fr;
++    gap: 10px;
++    margin: 18px 0;
++  }
++  .stat {
++    padding: 13px 16px;
++  }
++  .stat strong {
++    font-size: 26px;
++  }
++  .stat > span {
++    font-size: 11px;
++  }
++  .preview-heading {
++    padding: 19px 17px;
++    gap: 10px;
++  }
++  .preview-heading h2 {
++    font-size: 16px;
++  }
++  .preview-heading p:last-child {
++    font-size: 10px;
++  }
++  .file-tag {
++    font-size: 10px;
++    padding: 4px 7px;
++  }
++  .table-footer {
++    align-items: flex-start;
++    flex-direction: column;
++    gap: 10px;
++    padding: 14px 17px;
++  }
++  .notes {
++    gap: 10px;
++    padding-top: 20px;
++  }
++  .notes p {
++    font-size: 11px;
++  }
++  footer {
++    font-size: 9px;
++    flex-direction: column;
++    gap: 7px;
++  }
++  input,
++  select {
++    font-size: 16px;
++  }
++}
++@media (max-width: 380px) {
++  .fields {
++    grid-template-columns: minmax(0, 1fr);
++  }
++  .fields > div:nth-child(3),
++  .actions {
++    grid-column: auto;
++  }
++  .actions {
++    flex-direction: column;
++  }
++}
+diff --git a/tests/test_export_cli.py b/tests/test_export_cli.py
+new file mode 100644
+index 0000000..e6b9a7e
+--- /dev/null
++++ b/tests/test_export_cli.py
+@@ -0,0 +1,112 @@
++import csv
++import io
++import os
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from fernhill.__main__ import main
++
++from .fixtures import salon_db
++from .test_exports import add_appointment
++
++
++class ExportCLITest(unittest.TestCase):
++    def setUp(self):
++        directory = tempfile.TemporaryDirectory()
++        self.addCleanup(directory.cleanup)
++        self.root = Path(directory.name)
++        self.db = self.root / "salon.db"
++        conn = salon_db()
++        add_appointment(conn, status="done")
++        add_appointment(conn, status="cancelled", dog=3)
++        conn.commit()
++        target = sqlite3.connect(self.db)
++        conn.backup(target)
++        target.close()
++        conn.close()
++        self.original = self.db.read_bytes()
++
++    def run_cli(self, *args, db=None):
++        return subprocess.run(
++            [sys.executable, "-m", "fernhill", "--db", str(db or self.db), *args],
++            capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
++
++    def export(self, *args, db=None):
++        return self.run_cli("export", "--from", "2026-10-01", "--to", "2026-10-31", *args, db=db)
++
++    def test_stdout_is_csv_only_and_database_is_unchanged(self):
++        result = self.export()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        rows = list(csv.DictReader(io.StringIO(result.stdout.decode("utf-8-sig"))))
++        self.assertEqual([r["status"] for r in rows], ["done", "cancelled"])
++        self.assertIn(b"not amounts charged or paid", result.stderr)
++        self.assertNotIn(b"Prices are", result.stdout)
++        self.assertEqual(self.db.read_bytes(), self.original)
++
++    def test_output_file_and_status_filter(self):
++        output = self.root / "bookkeeper é.csv"
++        result = self.export("--status", "done", "--output", str(output))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(result.stdout, b"")
++        with output.open(encoding="utf-8-sig", newline="") as stream:
++            rows = list(csv.DictReader(stream))
++        self.assertEqual(len(rows), 1)
++        self.assertEqual(rows[0]["status"], "done")
++
++    def test_existing_output_and_database_cannot_be_overwritten(self):
++        output = self.root / "existing.csv"
++        output.write_bytes(b"keep me")
++        for destination in (output, self.db):
++            result = self.export("--output", str(destination))
++            self.assertEqual(result.returncode, 2)
++            self.assertIn(b"File exists", result.stderr)
++        self.assertEqual(output.read_bytes(), b"keep me")
++        self.assertEqual(self.db.read_bytes(), self.original)
++
++    def test_invalid_range_creates_no_output(self):
++        output = self.root / "bad.csv"
++        result = self.run_cli("export", "--from", "2026-10-31", "--to", "2026-10-01",
++                              "--output", str(output))
++        self.assertEqual(result.returncode, 2)
++        self.assertIn(b"on or before", result.stderr)
++        self.assertFalse(output.exists())
++        self.assertEqual(result.stdout, b"")
++
++    def test_missing_database_is_not_created(self):
++        missing = self.root / "missing.db"
++        result = self.export(db=missing)
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse(missing.exists())
++        self.assertEqual(result.stdout, b"")
++
++    def test_uninitialized_database_fails_before_writing_csv(self):
++        empty = self.root / "empty.db"
++        sqlite3.connect(empty).close()
++        output = self.root / "empty.csv"
++        result = self.export("--output", str(output), db=empty)
++        self.assertEqual(result.returncode, 2)
++        self.assertFalse(output.exists())
++
++    def test_reports_binds_only_to_loopback_and_uses_readonly_connection(self):
++        with patch("fernhill.__main__.make_server") as make_server, patch("sys.stdout", new=io.StringIO()) as out:
++            main(["--db", str(self.db), "reports", "--port", "8765"])
++            args = make_server.call_args.args
++            self.assertEqual(args[:2], ("127.0.0.1", 8765))
++            make_server.return_value.__enter__.return_value.serve_forever.assert_called_once()
++            self.assertIn("http://127.0.0.1:8765/", out.getvalue())
++        self.assertEqual(self.db.read_bytes(), self.original)
++
++    def test_invalid_reports_port_does_not_start_server(self):
++        for port in ("0", "65536", "-1"):
++            result = self.run_cli("reports", "--port", port)
++            self.assertEqual(result.returncode, 2)
++            self.assertIn(b"port must be", result.stderr)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_exports.py b/tests/test_exports.py
+new file mode 100644
+index 0000000..ef36e55
+--- /dev/null
++++ b/tests/test_exports.py
+@@ -0,0 +1,167 @@
++import csv
++import io
++import sqlite3
++import tempfile
++import unittest
++from datetime import date
++from pathlib import Path
++
++from fernhill import exports
++
++from .fixtures import salon_db
++
++
++def add_appointment(conn, start="2026-10-13T09:00", end="2026-10-13T09:45", *,
++                    status="booked", dog=1, groomer=1, service=1):
++    return conn.execute(
++        "INSERT INTO appointments (dog_id, groomer_id, service_id, start, end, status)"
++        " VALUES (?, ?, ?, ?, ?, ?)", (dog, groomer, service, start, end, status)).lastrowid
++
++
++def read_csv(conn, selection):
++    raw = b"".join(exports.csv_chunks(conn, selection))
++    return raw, list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline="")))
++
++
++class ExportsTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++        self.selection = exports.Selection.parse("2026-10-01", "2026-10-31")
++
++    def test_export_has_requested_columns_and_exact_data(self):
++        add_appointment(self.conn)
++        raw, rows = read_csv(self.conn, self.selection)
++        self.assertEqual(list(rows[0]), list(exports.COLUMNS))
++        self.assertEqual(rows, [{"date": "2026-10-13", "start": "09:00", "end": "09:45",
++                                "groomer": "Jess", "client": "Ana Ruiz", "dog": "Biscuit",
++                                "service": "Bath and brush", "price": "45.00", "status": "booked"}])
++        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
++        self.assertEqual(raw.count(b"\xef\xbb\xbf"), 1)
++        self.assertTrue(raw.endswith(b"\r\n"))
++        self.assertNotIn(b"phone", raw)
++        self.assertNotIn(b"email", raw)
++
++    def test_both_boundary_days_are_included_and_outside_days_excluded(self):
++        for day in ("2026-09-30", "2026-10-01", "2026-10-31", "2026-11-01"):
++            add_appointment(self.conn, f"{day}T23:59:30", f"{day}T23:59:59")
++        _, rows = read_csv(self.conn, self.selection)
++        self.assertEqual([r["date"] for r in rows], ["2026-10-01", "2026-10-31"])
++        self.assertEqual(rows[-1]["start"], "23:59:30")
++
++    def test_same_day_range(self):
++        add_appointment(self.conn)
++        _, rows = read_csv(self.conn, exports.Selection.parse("2026-10-13", "2026-10-13"))
++        self.assertEqual(len(rows), 1)
++
++    def test_all_statuses_are_exported_by_default(self):
++        for status in exports.STATUSES:
++            add_appointment(self.conn, status=status)
++        _, rows = read_csv(self.conn, self.selection)
++        self.assertEqual([r["status"] for r in rows], list(exports.STATUSES))
++        self.assertEqual(exports.counts(self.conn, self.selection), {"booked": 1, "done": 1, "cancelled": 1})
++
++    def test_each_status_filter_applies_to_rows_and_counts(self):
++        for status in exports.STATUSES:
++            add_appointment(self.conn, status=status)
++        for status in exports.STATUSES:
++            with self.subTest(status=status):
++                selection = exports.Selection(self.selection.start, self.selection.end, status)
++                _, rows = read_csv(self.conn, selection)
++                self.assertEqual([r["status"] for r in rows], [status])
++                self.assertEqual(sum(exports.counts(self.conn, selection).values()), 1)
++
++    def test_empty_export_still_has_headers(self):
++        raw, rows = read_csv(self.conn, self.selection)
++        self.assertEqual(rows, [])
++        self.assertEqual(raw.decode("utf-8-sig"), ",".join(exports.COLUMNS) + "\r\n")
++        self.assertEqual(exports.counts(self.conn, self.selection), {"booked": 0, "done": 0, "cancelled": 0})
++
++    def test_stable_chronological_order_with_ties(self):
++        late = add_appointment(self.conn, "2026-10-13T15:00", "2026-10-13T15:45")
++        first = add_appointment(self.conn, groomer=2)
++        second = add_appointment(self.conn, groomer=1)
++        self.assertEqual([r["id"] for r in exports.appointments(self.conn, self.selection)], [first, second, late])
++
++    def test_preview_pagination_does_not_limit_csv(self):
++        for _ in range(125):
++            add_appointment(self.conn)
++        preview = list(exports.appointments(self.conn, self.selection, limit=50, offset=50))
++        self.assertEqual([r["id"] for r in preview], list(range(51, 101)))
++        self.assertEqual(len(read_csv(self.conn, self.selection)[1]), 125)
++
++    def test_accents_quotes_commas_and_multiline_names_roundtrip(self):
++        names = {"groomers": 'Zoë, "Z"', "clients": "José\r\nGarcía", "dogs": "大福 🐾",
++                 "services": 'Bath, brush & "tidy"'}
++        for table, name in names.items():
++            self.conn.execute(f"UPDATE {table} SET name = ? WHERE id = 1", (name,))
++        add_appointment(self.conn)
++        _, rows = read_csv(self.conn, self.selection)
++        for column, table in (("groomer", "groomers"), ("client", "clients"),
++                              ("dog", "dogs"), ("service", "services")):
++            self.assertEqual(rows[0][column], names[table])
++
++    def test_spreadsheet_formulas_are_neutralized_in_every_name_column(self):
++        for table, name in (("groomers", '=HYPERLINK("https://example.invalid")'),
++                            ("clients", " +123"), ("dogs", "\t@SUM(1,2)"), ("services", "-10")):
++            self.conn.execute(f"UPDATE {table} SET name = ? WHERE id = 1", (name,))
++        add_appointment(self.conn)
++        _, rows = read_csv(self.conn, self.selection)
++        for column in ("groomer", "client", "dog", "service"):
++            self.assertTrue(rows[0][column].startswith("'"))
++        self.assertEqual(rows[0]["price"], "45.00")
++        self.assertEqual(rows[0]["date"], "2026-10-13")
++
++    def test_formula_prefix_and_safe_text_examples(self):
++        for value in ("=1", "+1", "-1", "@A1", "  =1", "\rHello", "\nHello", "\tHello", "\u00a0=1"):
++            with self.subTest(value=value):
++                self.assertEqual(exports.spreadsheet_text(value), "'" + value)
++        for value in ("", "Zoë", "O'Brien", "Two\nlines", "Dr. @ Groom", "  Biscuit"):
++            with self.subTest(value=value):
++                self.assertEqual(exports.spreadsheet_text(value), value)
++
++    def test_price_uses_current_catalog_and_integer_precision(self):
++        add_appointment(self.conn)
++        self.conn.execute("UPDATE services SET price_cents = 12345678901234567 WHERE id = 1")
++        self.assertEqual(read_csv(self.conn, self.selection)[1][0]["price"], "123456789012345.67")
++        for cents, expected in ((0, "0.00"), (1, "0.01"), (999, "9.99"), (-105, "-1.05")):
++            self.assertEqual(exports.price(cents), expected)
++
++    def test_range_validation(self):
++        bad_ranges = (("2026-10-31", "2026-10-01"), ("", "2026-10-01"),
++                      ("20261001", "2026-10-31"), ("2026-02-29", "2026-03-01"),
++                      ("2026-10-01T10:00", "2026-10-31"), ("x' OR 1=1--", "2026-10-31"))
++        for start, end in bad_ranges:
++            with self.subTest(start=start, end=end), self.assertRaises(ValueError):
++                exports.Selection.parse(start, end)
++        for status in ("", "completed", "all' OR 1=1--"):
++            with self.subTest(status=status), self.assertRaises(ValueError):
++                exports.Selection.parse("2026-10-01", "2026-10-31", status)
++
++    def test_leap_day_and_max_date_work(self):
++        for day in ("2024-02-29", "9999-12-31"):
++            add_appointment(self.conn, f"{day}T09:00", f"{day}T09:45")
++            self.assertEqual(len(read_csv(self.conn, exports.Selection.parse(day, day))[1]), 1)
++
++    def test_readonly_connection_never_creates_or_modifies_database(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory, "salon with spaces & accents é.db")
++            with self.assertRaises(sqlite3.OperationalError):
++                exports.connect_readonly(str(path))
++            self.assertFalse(path.exists())
++            target = sqlite3.connect(path)
++            self.conn.backup(target)
++            target.close()
++            before = path.read_bytes()
++            conn = exports.connect_readonly(str(path))
++            try:
++                self.assertEqual(read_csv(conn, self.selection)[1], [])
++                with self.assertRaises(sqlite3.OperationalError):
++                    conn.execute("DELETE FROM clients")
++            finally:
++                conn.close()
++            self.assertEqual(path.read_bytes(), before)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_reports.py b/tests/test_reports.py
+new file mode 100644
+index 0000000..73d0b1c
+--- /dev/null
++++ b/tests/test_reports.py
+@@ -0,0 +1,198 @@
++import csv
++import io
++import unittest
++from datetime import date
++from urllib.parse import urlencode
++
++from fernhill import exports, reports, web
++
++from .fixtures import salon_db
++from .test_exports import add_appointment
++
++
++def request(app, path="/", query="", method="GET", **overrides):
++    environ = {"REQUEST_METHOD": method, "PATH_INFO": path, "QUERY_STRING": query,
++               "REMOTE_ADDR": "127.0.0.1", "SERVER_PORT": "8001", "HTTP_HOST": "127.0.0.1:8001",
++               "wsgi.input": io.BytesIO(b""), "CONTENT_LENGTH": "0"}
++    environ.update(overrides)
++    response = []
++    def start_response(status, headers):
++        response.extend((int(status.split()[0]), dict(headers)))
++    body = b"".join(app(environ, start_response))
++    return response[0], response[1], body
++
++
++class ReportsTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++        self.app = reports.make_app(self.conn, today=date(2026, 11, 5))
++        self.query = "start=2026-10-01&end=2026-10-31&status=all"
++
++    def test_default_is_last_calendar_month(self):
++        code, headers, body = request(self.app)
++        html = body.decode()
++        self.assertEqual(code, 200)
++        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
++        self.assertIn('value="2026-10-01"', html)
++        self.assertIn('value="2026-10-31"', html)
++        self.assertIn("Test Salon", html)
++        self.assertIn("No appointments in this range", html)
++        self.assertIn(exports.PRICE_NOTE, html)
++        self.assertIn('formaction="/appointments.csv"', html)
++
++    def test_common_ranges_handle_year_and_leap_boundaries(self):
++        self.assertEqual(reports.default_selection(date(2026, 1, 5)),
++                         exports.Selection.parse("2025-12-01", "2025-12-31"))
++        self.assertEqual(reports.default_selection(date(2024, 3, 1)),
++                         exports.Selection.parse("2024-02-01", "2024-02-29"))
++        last_month, this_month, last_30 = reports.selections(date(2024, 3, 1), "done")
++        self.assertEqual(this_month[1], exports.Selection.parse("2024-03-01", "2024-03-31", "done"))
++        self.assertEqual(last_30[1], exports.Selection.parse("2024-02-01", "2024-03-01", "done"))
++        self.assertEqual(last_month[1].status, "done")
++
++    def test_preview_includes_counts_and_status_labels(self):
++        for status in exports.STATUSES:
++            add_appointment(self.conn, status=status)
++        code, _, body = request(self.app, query=self.query)
++        html = body.decode()
++        self.assertEqual(code, 200)
++        self.assertIn("CSV · 3 rows", html)
++        self.assertIn("Completed", html)
++        self.assertIn("Cancelled", html)
++        self.assertIn("Download includes all 3 matching rows", html)
++        self.assertEqual(html.count("<tbody>"), 1)
++        self.assertEqual(html.count("<tr>"), 4)
++
++    def test_status_filter_changes_rows_and_selected_control(self):
++        add_appointment(self.conn, status="booked", dog=1)
++        add_appointment(self.conn, status="done", dog=3)
++        code, _, body = request(self.app, query=self.query.replace("status=all", "status=done"))
++        html = body.decode()
++        self.assertEqual(code, 200)
++        self.assertIn("Pepper", html)
++        self.assertNotIn("Biscuit", html)
++        self.assertIn('<option value="done" selected>', html)
++        self.assertIn("CSV · 1 row", html)
++
++    def test_preview_is_paginated_but_download_has_every_matching_row(self):
++        for _ in range(125):
++            add_appointment(self.conn)
++        _, _, first = request(self.app, query=self.query)
++        self.assertIn(b"Showing 1", first)
++        self.assertEqual(first.count(b"<tr>"), 51)
++        self.assertIn(b'rel="next"', first)
++        _, _, last = request(self.app, query=self.query + "&page=3")
++        self.assertIn(b"Showing 101", last)
++        self.assertEqual(last.count(b"<tr>"), 26)
++        self.assertNotIn(b'rel="next"', last)
++        _, _, download = request(self.app, "/appointments.csv", self.query + "&page=3")
++        self.assertEqual(len(list(csv.DictReader(io.StringIO(download.decode("utf-8-sig"))))), 125)
++
++    def test_out_of_range_preview_page_is_clamped(self):
++        add_appointment(self.conn)
++        code, _, body = request(self.app, query=self.query + "&page=999999999999999999999")
++        self.assertEqual(code, 200)
++        self.assertIn(b"Showing 1", body)
++        self.assertIn(b"Biscuit", body)
++
++    def test_csv_headers_filename_and_encoding(self):
++        add_appointment(self.conn)
++        code, headers, body = request(self.app, "/appointments.csv", self.query)
++        self.assertEqual(code, 200)
++        self.assertEqual(headers["Content-Type"], "text/csv; charset=utf-8")
++        self.assertEqual(headers["Content-Disposition"],
++                         'attachment; filename="appointments_2026-10-01_2026-10-31_all.csv"')
++        self.assertEqual(headers["Cache-Control"], "no-store")
++        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
++        self.assertTrue(body.startswith(b"\xef\xbb\xbfdate,start,end,"))
++
++    def test_invalid_ranges_render_useful_errors_and_do_not_download(self):
++        for query, expected in (
++            ("start=2026-10-31&end=2026-10-01", "on or before"),
++            ("start=2026-02-30&end=2026-03-01", "valid calendar date"),
++            ("start=2026-10-01", "YYYY-MM-DD"),
++            (self.query.replace("status=all", "status=other"), "Status must"),
++            (self.query + "&status=done", "one value"),
++            (self.query + "&page=0", "1 or greater"),
++            (self.query + "&other=x", "choose your export"),
++        ):
++            with self.subTest(query=query):
++                code, headers, body = request(self.app, "/appointments.csv", query)
++                self.assertEqual(code, 400)
++                self.assertNotIn("Content-Disposition", headers)
++                self.assertIn(expected, body.decode())
++                self.assertIn(b'role="alert"', body)
++
++    def test_download_requires_explicit_dates(self):
++        self.assertEqual(request(self.app, "/appointments.csv")[0], 400)
++
++    def test_html_escapes_all_database_names(self):
++        name = '<script>alert("x")</script>'
++        for table in ("salon", "groomers", "clients", "dogs", "services"):
++            self.conn.execute(f"UPDATE {table} SET name = ? WHERE id = 1", (name,))
++        add_appointment(self.conn)
++        code, _, body = request(self.app, query=self.query)
++        self.assertEqual(code, 200)
++        self.assertNotIn(name, body.decode())
++        self.assertIn("&lt;script&gt;", body.decode())
++        self.assertNotIn(b"<script", body)
++
++    def test_error_form_escapes_query_values(self):
++        bad = '"><script>alert(1)</script>'
++        code, _, body = request(self.app, query=urlencode({"start": bad, "end": "2026-10-31"}))
++        self.assertEqual(code, 400)
++        self.assertNotIn(b"<script", body)
++        self.assertIn(b"&lt;script&gt;", body)
++
++    def test_local_access_guards(self):
++        rejected = (
++            {"REMOTE_ADDR": "203.0.113.5"}, {"REMOTE_ADDR": ""},
++            {"HTTP_HOST": "evil.example:8001"}, {"HTTP_HOST": "127.0.0.1:9999"},
++            {"HTTP_ORIGIN": "https://evil.example"}, {"HTTP_ORIGIN": "null"},
++            {"HTTP_SEC_FETCH_SITE": "cross-site"}, {"HTTP_SEC_FETCH_SITE": "same-site"},
++        )
++        for overrides in rejected:
++            for path in ("/", "/appointments.csv", "/assets/reports.css"):
++                with self.subTest(overrides=overrides, path=path):
++                    code, _, body = request(self.app, path, self.query, **overrides)
++                    self.assertEqual(code, 403)
++                    self.assertNotIn(b"Ana", body)
++
++    def test_same_origin_loopback_requests_work(self):
++        for host in ("127.0.0.1:8001", "localhost:8001", "[::1]:8001"):
++            with self.subTest(host=host):
++                self.assertEqual(request(self.app, HTTP_HOST=host, HTTP_ORIGIN="http://" + host,
++                                         HTTP_SEC_FETCH_SITE="same-origin")[0], 200)
++        self.assertEqual(request(self.app, REMOTE_ADDR="::1")[0], 200)
++
++    def test_security_headers_also_protect_html_and_errors(self):
++        for path in ("/", "/missing"):
++            _, headers, _ = request(self.app, path)
++            self.assertEqual(headers["Cache-Control"], "no-store")
++            self.assertEqual(headers["X-Frame-Options"], "DENY")
++            self.assertIn("form-action 'self'", headers["Content-Security-Policy"])
++            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
++
++    def test_unsupported_methods_and_routes(self):
++        code, headers, _ = request(self.app, method="POST")
++        self.assertEqual(code, 405)
++        self.assertEqual(headers["Allow"], "GET")
++        self.assertEqual(request(self.app, "/missing")[0], 404)
++        self.assertEqual(request(self.app, "/assets/../db.py")[0], 404)
++        self.assertEqual(request(self.app, "/api/appointments", method="POST")[0], 405)
++
++    def test_stylesheet_is_served(self):
++        code, headers, body = request(self.app, "/assets/reports.css")
++        self.assertEqual(code, 200)
++        self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
++        self.assertIn(b"@media", body)
++
++    def test_booking_app_does_not_expose_exports(self):
++        app = web.make_app(self.conn)
++        for path in ("/appointments.csv", "/reports", "/assets/reports.css"):
++            self.assertEqual(request(app, path, self.query)[0], 404)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.39.5 (Apple Git-154)
+

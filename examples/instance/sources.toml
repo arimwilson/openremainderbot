@@ -1,0 +1,19 @@
+# What the snapshot reads at the start of each tick. Every field is in docs/sources.md.
+version = 1
+
+[[sources]]
+name = "issues"
+type = "gh-issues"
+repos = ["arimwilson/fernhill"]
+description = "Open Fernhill issues; `customer` means a paying or trial salon asked for it"
+
+[[sources]]
+name = "repos"
+type = "gh-roadmaps"
+repos = ["arimwilson/fernhill"]
+
+[[sources]]
+name = "notes"
+type = "file"
+paths = ["notes/*.md", "notes/*.csv"]
+description = "My TODO list (errands and deliverables mixed), newsletter outlines, and the Oct 1 trial export"

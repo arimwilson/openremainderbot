@@ -1,0 +1,1333 @@
+From ec6fdbf29319570f18f8958cefb29382609cf6cb Mon Sep 17 00:00:00 2001
+From: Ari Wilson <ari.wilson@gmail.com>
+Date: Wed, 7 Oct 2026 20:54:20 -0700
+Subject: [PATCH] Add groomer time off and a local staff manager
+
+Support one-off and weekly blocks with existing-booking conflict checks. Enforce blocks in offered slots and direct bookings, serialize schedule writes, and keep staff management on a separate localhost server. Include migration, recurrence, API, and concurrent-write tests plus operator documentation.
+---
+ README.md              |  16 +++
+ docs/time-off.md       | 135 +++++++++++++++++++
+ fernhill/__main__.py   |   9 +-
+ fernhill/db.py         |  24 ++++
+ fernhill/scheduling.py |  15 ++-
+ fernhill/staff.html    | 245 ++++++++++++++++++++++++++++++++++
+ fernhill/staff.py      | 105 +++++++++++++++
+ fernhill/time_off.py   | 115 ++++++++++++++++
+ tests/test_staff.py    | 197 +++++++++++++++++++++++++++
+ tests/test_time_off.py | 294 +++++++++++++++++++++++++++++++++++++++++
+ 10 files changed, 1150 insertions(+), 5 deletions(-)
+ create mode 100644 docs/time-off.md
+ create mode 100644 fernhill/staff.html
+ create mode 100644 fernhill/staff.py
+ create mode 100644 fernhill/time_off.py
+ create mode 100644 tests/test_staff.py
+ create mode 100644 tests/test_time_off.py
+
+diff --git a/README.md b/README.md
+index 5cf9ec6..a9e50e6 100644
+--- a/README.md
++++ b/README.md
+@@ -10,6 +10,7 @@ One salon per database. Python 3.11+, standard library only.
+ ```sh
+ python3 -m fernhill seed                      # a demo salon with bookings on the next open day
+ python3 -m fernhill serve                     # the booking page on http://localhost:8000/
++python3 -m fernhill staff                     # local time-off manager on http://127.0.0.1:8001/
+ python3 -m fernhill day --date 2026-10-13     # the day sheet
+ python3 -m fernhill reminders --date 2026-10-13
+ python3 -m unittest                           # the tests
+@@ -22,6 +23,8 @@ python3 -m unittest                           # the tests
+ | `fernhill/scheduling.py` | opening hours, open slots, booking and cancelling |
+ | `fernhill/reminders.py` | the day-before texts (the server's 5pm cron pipes them to the SMS gateway) |
+ | `fernhill/web.py` | the booking page and the JSON API |
++| `fernhill/time_off.py` | one-off and weekly groomer blocks, enforced by scheduling |
++| `fernhill/staff.py`, `fernhill/staff.html` | the separate localhost staff screen for time off |
+ | `fernhill/billing.py` | plans, the 14-day trial, plan-change charges. Changed by hand only. |
+ | `fernhill/db.py` | the SQLite schema |
+ 
+@@ -33,3 +36,16 @@ python3 -m unittest                           # the tests
+ - `GET /api/appointments?date=2026-10-13` → the day sheet
+ 
+ See [ROADMAP.md](ROADMAP.md) for what's next.
++
++## Time off and breaks
++
++Choose a groomer, date, and time range in the local staff screen to save one-off
++time off or a weekly break. Blocks remove overlapping slots and reject direct
++bookings. Existing bookings are preserved: conflicting blocks must wait until the
++appointment is moved or cancelled. Blocks never create client reminders.
++
++Use the same `--db` path for both servers. The staff screen is local-only because
++Fernhill does not yet have staff login; do not expose port 8001 publicly. Existing
++databases gain the new table automatically. Restart running booking processes
++after installing the change. See [the time-off guide](docs/time-off.md) for setup,
++recurrence rules, conflict handling, API details, and verification.
+diff --git a/docs/time-off.md b/docs/time-off.md
+new file mode 100644
+index 0000000..2fdf7e9
+--- /dev/null
++++ b/docs/time-off.md
+@@ -0,0 +1,135 @@
++# Groomer time off and breaks
++
++Use time-off blocks for lunch, personal appointments, or a day away. They remove
++unavailable times from the booking page and reject direct bookings that overlap.
++They do not create appointments, appear on the day sheet, or generate reminders.
++
++## Open the staff screen
++
++From the Fernhill checkout, run:
++
++```sh
++python3 -m fernhill --db fernhill.db staff
++```
++
++Open **http://127.0.0.1:8001/** on that computer. The database must already contain
++your salon and groomers. Use the same database path as the booking server. The
++public booking server continues to run with `python3 -m fernhill serve` on port
++8000; the optional staff command is a separate process. To change its port:
++
++```sh
++python3 -m fernhill --db fernhill.db staff --port 8002
++```
++
++The screen includes a day view of appointments and time off, a saved-block list,
++and a form for adding blocks. Choose the groomer first. Choose a date and local
++start/end times, then select **Does not repeat** or **Every week**. An optional
++label such as “Lunch” is visible only in the staff tool. Click **Save time off**.
++The date in the form is the first occurrence, even if it differs from View day.
++
++A weekly block repeats on that weekday, from the chosen date onward, until
++removed. For a full day away, cover the salon's opening hours. Blocks can also be
++saved on closed days or outside opening hours; they do not open the salon.
++
++To remove a block, use its **Remove** button and confirm. For weekly blocks this
++removes the entire series, including its historical occurrences. Cancelling the
++dialog changes nothing. Editing means removing a block and adding its replacement;
++there is currently no single-occurrence exception or series end date.
++
++## Booking rules
++
++- A service must fit entirely outside the groomer's blocks. For example, a
++  45-minute bath at 12:00 is unavailable during a 12:30–13:00 lunch.
++- Appointments may end exactly when a block starts or start exactly when it ends.
++- Blocks affect only their assigned groomer.
++- Adding a block that overlaps an existing **booked** appointment is rejected.
++  The error names the first conflicting date/time. Move or cancel that appointment
++  through the salon's existing workflow before trying again. For weekly blocks,
++  every booked occurrence from the first date onward is checked, with no cutoff.
++  Cancelled and completed appointments do not prevent a new block.
++- Multiple overlapping blocks are allowed. Removing one leaves the other blocks
++  in place. Removing time off never removes or changes an appointment.
++- All dates and times use the salon's existing local-time convention. Blocks are
++  minute-precision, within a single calendar day; overnight blocks are rejected.
++  For overnight time off, enter a block on each affected day covering its hours.
++- The booking server rechecks availability inside the same database write
++  transaction as the booking. If staff adds a block while a client is choosing a
++  time, the client's booking is rejected if the block wins the write lock. If the
++  booking wins, adding the conflicting block is rejected instead.
++
++The last-slot closing-time behavior tracked separately in issue #2 is unchanged.
++
++## Local access and storage
++
++Fernhill does not yet have staff accounts. The staff command binds to **127.0.0.1**
++and must remain local. It is not a public admin site. Do not expose its port or
++mount `staff.make_app` in the public booking server. Staff mutation routes are not
++present in the public app.
++
++The local app restricts Host to loopback names, requires a per-process page token
++for writes, serves no CORS permissions, and refuses framing. These protect the
++local tool from other websites; they are not a replacement for staff authentication
++or OS access controls. Anyone with access to this computer can use it. A browser
++page left open across a staff-server restart must be refreshed before saving.
++
++Opening an existing database automatically creates the additive `time_off` table
++and its index with `CREATE ... IF NOT EXISTS`. Existing tables and appointments
++are preserved. Stop and restart an already-running booking process after installing
++this code so that it uses the new scheduling rules. The database itself needs no
++manual migration command. For rollback, remove blocks through the staff screen
++first; older code does not enforce them.
++
++## API and Python use
++
++These routes belong only to the local staff app:
++
++| Method and route | Result |
++|---|---|
++| `GET /api/time-off?groomer=1` | `{"blocks": [...]}`: all saved blocks, including past one-off dates |
++| `GET /api/schedule?groomer=1&date=2026-10-13` | Opening hours, booked appointments, and blocks applying that day |
++| `POST /api/time-off` | `201 {"id": 1}` or an error; JSON fields below |
++| `DELETE /api/time-off/1` | `200 {"removed": true}`, or `404` if already removed |
++
++POST takes `groomer_id` (integer), `starts_on` (`YYYY-MM-DD`), `start_time` and
++`end_time` (`HH:MM`), `repeat` (`once` or `weekly`, defaults to `once`), and `note`
++(optional, one line, at most 120 characters). JSON request bodies are limited to
++4 KB. POST and DELETE require `X-Fernhill-Token` from the current staff page.
++The UI handles this automatically.
++
++Malformed input returns `400`, existing-booking conflicts return `409`, missing or
++invalid page tokens return `403`, and database lock timeouts return `503` with a
++retry message. Reads and writes return JSON errors. The public appointment route
++continues to return `409` for bookings that overlap time off.
++
++For scripts already running locally with database access:
++
++```python
++from fernhill import db, time_off
++
++conn = db.connect("fernhill.db")
++block_id = time_off.add_block(
++    conn, groomer_id=1, starts_on="2026-10-13", start_time="12:30",
++    end_time="13:00", repeat="weekly", note="Lunch",
++)
++blocks = time_off.list_blocks(conn, 1)
++# When this block is no longer needed:
++time_off.remove_block(conn, block_id)
++conn.close()
++```
++
++Time-off writes and `scheduling.book()` own their transactions; commit or roll back
++unrelated writes before calling them. Both acquire SQLite's write lock before
++checking conflicts. No billing behavior is changed.
++
++## Verification
++
++```sh
++python3 -m unittest -v
++python3 -m compileall -q fernhill tests
++```
++
++The tests cover one-off and weekly recurrence, year/leap-day boundaries, duration
++overlaps, groomer isolation, exact boundaries, direct booking, unchanged reminders,
++conflicting future appointments, block removal, validation, legacy-database
++upgrades, persistence, simultaneous connections, the public/staff route separation,
++request protections, and the loopback CLI binding. No external service is required.
+diff --git a/fernhill/__main__.py b/fernhill/__main__.py
+index a130b4a..7435dbd 100644
+--- a/fernhill/__main__.py
++++ b/fernhill/__main__.py
+@@ -1,11 +1,11 @@
+-"""python3 -m fernhill {seed,serve,reminders,day}"""
++"""python3 -m fernhill {seed,serve,staff,reminders,day}"""
+ from __future__ import annotations
+ 
+ import argparse
+ from datetime import date
+ from wsgiref.simple_server import make_server
+ 
+-from . import db, reminders, scheduling, seed, web
++from . import db, reminders, scheduling, seed, staff, web
+ 
+ 
+ def main(argv: list[str] | None = None) -> None:
+@@ -15,6 +15,8 @@ def main(argv: list[str] | None = None) -> None:
+     sub.add_parser("seed", help="create a demo salon with a few bookings tomorrow")
+     s = sub.add_parser("serve", help="serve the booking page on localhost")
+     s.add_argument("--port", type=int, default=8000)
++    t = sub.add_parser("staff", help="manage groomer time off on localhost (staff only)")
++    t.add_argument("--port", type=int, default=8001)
+     r = sub.add_parser("reminders", help="print the reminder texts for a day")
+     r.add_argument("--date", type=date.fromisoformat, required=True)
+     d = sub.add_parser("day", help="print the day sheet")
+@@ -28,6 +30,9 @@ def main(argv: list[str] | None = None) -> None:
+     elif args.cmd == "serve":
+         print(f"http://localhost:{args.port}/")
+         make_server("127.0.0.1", args.port, web.make_app(conn)).serve_forever()
++    elif args.cmd == "staff":
++        print(f"Staff time off: http://127.0.0.1:{args.port}/", flush=True)
++        make_server("127.0.0.1", args.port, staff.make_app(conn)).serve_forever()
+     elif args.cmd == "reminders":
+         for m in reminders.reminders_for(conn, args.date):
+             print(f"{m.phone}\t{m.text}")
+diff --git a/fernhill/db.py b/fernhill/db.py
+index 220907c..2af2966 100644
+--- a/fernhill/db.py
++++ b/fernhill/db.py
+@@ -2,6 +2,7 @@
+ from __future__ import annotations
+ 
+ import sqlite3
++from contextlib import contextmanager
+ 
+ SIZES = ("small", "medium", "large")
+ 
+@@ -49,6 +50,17 @@ CREATE TABLE IF NOT EXISTS appointments (
+     end TEXT NOT NULL,
+     status TEXT NOT NULL DEFAULT 'booked' CHECK (status IN ('booked', 'cancelled', 'done'))
+ );
++CREATE TABLE IF NOT EXISTS time_off (
++    id INTEGER PRIMARY KEY,
++    groomer_id INTEGER NOT NULL REFERENCES groomers(id),
++    starts_on TEXT NOT NULL,         -- first date, also the weekday for weekly blocks
++    start_time TEXT NOT NULL,        -- 'HH:MM', salon local time
++    end_time TEXT NOT NULL,
++    repeat TEXT NOT NULL CHECK (repeat IN ('once', 'weekly')),
++    note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 120),
++    CHECK (start_time < end_time)
++);
++CREATE INDEX IF NOT EXISTS time_off_groomer_date ON time_off (groomer_id, starts_on);
+ """
+ 
+ 
+@@ -60,6 +72,18 @@ def connect(path: str = ":memory:") -> sqlite3.Connection:
+     return conn
+ 
+ 
++@contextmanager
++def schedule_write(conn: sqlite3.Connection):
++    """Serialize availability checks and writes across staff and booking connections.
++
++    Like book(), callers must finish any unrelated transaction before calling.
++    BEGIN IMMEDIATE obtains the write lock before reading availability.
++    """
++    conn.execute("BEGIN IMMEDIATE")
++    with conn:
++        yield
++
++
+ def salon(conn: sqlite3.Connection) -> sqlite3.Row:
+     row = conn.execute("SELECT * FROM salon ORDER BY id LIMIT 1").fetchone()
+     if row is None:
+diff --git a/fernhill/scheduling.py b/fernhill/scheduling.py
+index f5289d6..8d8ec89 100644
+--- a/fernhill/scheduling.py
++++ b/fernhill/scheduling.py
+@@ -4,7 +4,8 @@ from __future__ import annotations
+ import sqlite3
+ from datetime import date, datetime, time, timedelta
+ 
+-from .db import SIZES, salon
++from . import time_off
++from .db import SIZES, salon, schedule_write
+ 
+ 
+ class BookingError(Exception):
+@@ -50,7 +51,7 @@ def available_slots(conn: sqlite3.Connection, groomer_id: int, service_id: int,
+     opens, closes = h
+     length = duration(conn, service_id, size)
+     step = timedelta(minutes=salon(conn)["slot_minutes"])
+-    taken = busy(conn, groomer_id, day)
++    taken = busy(conn, groomer_id, day) + time_off.intervals(conn, groomer_id, day)
+     slots = []
+     t = opens
+     while t + length < closes:
+@@ -62,6 +63,12 @@ def available_slots(conn: sqlite3.Connection, groomer_id: int, service_id: int,
+ 
+ def book(conn: sqlite3.Connection, dog_id: int, groomer_id: int, service_id: int,
+          start: datetime) -> int:
++    with schedule_write(conn):
++        return _book(conn, dog_id, groomer_id, service_id, start)
++
++
++def _book(conn: sqlite3.Connection, dog_id: int, groomer_id: int, service_id: int,
++          start: datetime) -> int:
+     dog = conn.execute("SELECT * FROM dogs WHERE id = ?", (dog_id,)).fetchone()
+     if dog is None:
+         raise BookingError("that dog isn't in the system")
+@@ -74,6 +81,9 @@ def book(conn: sqlite3.Connection, dog_id: int, groomer_id: int, service_id: int
+     opens, closes = h
+     if start < opens or end >= closes:
+         raise BookingError("that time is outside opening hours")
++    for s, e in time_off.intervals(conn, groomer_id, start.date()):
++        if overlaps(start, end, s, e):
++            raise BookingError("the groomer has time off then; choose another time")
+     for s, e in busy(conn, groomer_id, start.date()):
+         if overlaps(start, end, s, e):
+             raise BookingError("the groomer is already booked then")
+@@ -81,7 +91,6 @@ def book(conn: sqlite3.Connection, dog_id: int, groomer_id: int, service_id: int
+         "INSERT INTO appointments (dog_id, groomer_id, service_id, start, end) VALUES (?, ?, ?, ?, ?)",
+         (dog_id, groomer_id, service_id,
+          start.isoformat(timespec="minutes"), end.isoformat(timespec="minutes")))
+-    conn.commit()
+     return cur.lastrowid
+ 
+ 
+diff --git a/fernhill/staff.html b/fernhill/staff.html
+new file mode 100644
+index 0000000..78c9420
+--- /dev/null
++++ b/fernhill/staff.html
+@@ -0,0 +1,245 @@
++<!doctype html>
++<html lang="en">
++<head>
++  <meta charset="utf-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1">
++  <meta name="fernhill-token" content="$token">
++  <title>Time off · $salon</title>
++  <style>
++    :root { color-scheme: light; --ink:#193a34; --muted:#5c716b; --green:#235b49; --line:#d9e2db; --paper:#fffefb; }
++    * { box-sizing: border-box; }
++    body { margin:0; background:#f3f5ef; color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif; }
++    button,input,select { font:inherit; }
++    button { cursor:pointer; }
++    button:disabled { cursor:wait; opacity:.6; }
++    :focus-visible { outline:3px solid #ad652c; outline-offset:3px; }
++    .topbar { background:var(--ink); color:#f8faf5; padding:18px max(24px, calc((100% - 1180px)/2)); display:flex; align-items:center; justify-content:space-between; gap:20px; }
++    .brand { font:700 22px/1.2 Georgia,serif; letter-spacing:.3px; }
++    .brand span { display:inline-block; color:#c8dba8; margin-right:8px; }
++    .salon { font-size:13px; color:#d5e1d9; text-align:right; }
++    main { max-width:1228px; margin:auto; padding:36px 24px 48px; }
++    .eyebrow { text-transform:uppercase; letter-spacing:1.8px; font-size:11px; font-weight:750; color:var(--muted); margin:0 0 8px; }
++    h1 { font:400 clamp(32px,4vw,44px)/1.15 Georgia,serif; margin:0 0 10px; letter-spacing:-.9px; }
++    .intro { color:var(--muted); margin:0; max-width:650px; }
++    .filters { display:flex; align-items:end; gap:16px; padding:24px 0; flex-wrap:wrap; }
++    label { display:block; font-size:13px; font-weight:650; margin-bottom:6px; }
++    input,select { display:block; width:100%; min-width:0; color:var(--ink); background:white; border:1px solid #b6c8bd; border-radius:7px; min-height:43px; padding:9px 11px; }
++    .filter { min-width:180px; }
++    .day-nav { display:flex; gap:6px; }
++    .button { border:1px solid #b6c8bd; border-radius:7px; min-height:43px; background:white; color:var(--ink); padding:9px 15px; font-weight:600; }
++    .primary { color:white; background:var(--green); border-color:var(--green); }
++    .primary:hover { background:#173f33; }
++    .subtle { color:var(--muted); font-size:13px; }
++    .local-time { margin:0 0 11px auto; font-size:12px; color:var(--muted); }
++    .columns { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(330px,1fr); gap:24px; align-items:start; }
++    .card { background:var(--paper); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
++    .card-head { padding:23px 24px 19px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:start; }
++    h2 { font:400 25px/1.2 Georgia,serif; letter-spacing:-.3px; margin:0 0 6px; }
++    .card-head p { margin:0; }
++    .date-mark { background:#edf1e5; border-radius:7px; padding:7px 12px; font-size:12px; white-space:nowrap; }
++    .agenda { padding:18px 24px 24px; min-height:260px; }
++    .stats { display:flex; gap:16px; padding:0 0 18px; color:var(--muted); font-size:12px; }
++    .dot { display:inline-block; height:8px; width:8px; border-radius:50%; background:#4e7867; margin-right:6px; }
++    .dot.break { background:#bd8747; }
++    .event { display:grid; grid-template-columns:92px 1fr; gap:12px; margin-bottom:12px; }
++    .event-time { color:var(--muted); font-size:12px; padding-top:13px; font-variant-numeric:tabular-nums; }
++    .event-main { border-left:3px solid #6f9380; background:#edf4ed; border-radius:0 7px 7px 0; padding:12px 15px; }
++    .event.off .event-main { background:#f8efdf; border-left-color:#b68443; }
++    .event-title { font-weight:650; margin:0; overflow-wrap:anywhere; }
++    .event-meta { color:var(--muted); font-size:12px; margin:3px 0 0; }
++    .empty { background:#f7f8f2; border:1px dashed #c8d5cb; border-radius:8px; color:var(--muted); padding:28px 20px; text-align:center; }
++    .empty strong { display:block; font:400 22px/1.3 Georgia,serif; color:var(--ink); margin-bottom:6px; }
++    .form-body { padding:22px 24px 24px; }
++    .form-body .field { margin-bottom:16px; }
++    .two { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
++    .hint { font-size:12px; color:var(--muted); margin:7px 0 0; }
++    .form-body .primary { width:100%; margin-top:2px; }
++    .protection { border-top:1px solid var(--line); padding:15px 24px; background:#f9faf4; font-size:12px; color:var(--muted); }
++    .protection strong { color:var(--ink); }
++    .message { border-radius:7px; padding:10px 13px; margin:0 0 16px; background:#e8f2e6; font-size:13px; }
++    .message.error { background:#fff0e8; color:#813719; }
++    [hidden] { display:none !important; }
++    .saved { margin-top:24px; }
++    .saved-list { list-style:none; padding:0; margin:0; }
++    .saved-row { display:flex; gap:16px; align-items:center; padding:18px 24px; border-top:1px solid var(--line); }
++    .saved-row:first-child { border-top:0; }
++    .saved-info { flex:1; min-width:0; }
++    .saved-info p { margin:0; overflow-wrap:anywhere; }
++    .tag { display:inline-block; font-size:10px; text-transform:uppercase; letter-spacing:.6px; font-weight:700; border:1px solid #cedccb; border-radius:4px; padding:2px 6px; margin-right:6px; color:var(--green); }
++    .saved-detail { font-size:12px; color:var(--muted); margin-top:5px !important; }
++    .remove { background:transparent; border:1px solid var(--line); border-radius:6px; color:var(--muted); font-size:12px; padding:7px 10px; min-height:36px; }
++    .remove:hover { border-color:#9a5438; color:#8c4028; }
++    .saved-empty { color:var(--muted); padding:22px 24px; margin:0; }
++    footer { color:var(--muted); font-size:12px; margin:20px 0 0; }
++    dialog { color:var(--ink); background:var(--paper); max-width:450px; width:calc(100% - 32px); padding:26px; border:1px solid var(--line); border-radius:12px; }
++    dialog::backdrop { background:#193a345c; }
++    dialog p { overflow-wrap:anywhere; }
++    .dialog-actions { display:flex; justify-content:end; gap:10px; margin-top:24px; }
++    .danger { background:#843d2b; color:white; border-color:#843d2b; }
++    @media(max-width:800px) { .columns { grid-template-columns:1fr; } .local-time { margin:0; width:100%; } }
++    @media(max-width:480px) { main { padding:26px 16px; } .topbar { padding:16px; } .filter { min-width:0; flex:1 1 160px; } .filters { gap:12px; } .day-nav { width:100%; } .card-head,.form-body,.agenda { padding:20px; } .event { grid-template-columns:78px 1fr; gap:8px; } .saved-row { padding:16px 20px; gap:10px; } .salon { max-width:180px; } .date-mark { display:none; } }
++  </style>
++</head>
++<body>
++<header class="topbar"><div class="brand"><span aria-hidden="true">❧</span>fernhill</div><div class="salon">$salon · Staff</div></header>
++<main>
++  <p class="eyebrow">A little room in the day</p>
++  <h1>Time off &amp; breaks</h1>
++  <p class="intro">Make space for lunch, an appointment, or a day away. Your clients will only see times you can take.</p>
++  <div class="filters">
++    <div class="filter"><label for="groomer">Groomer</label><select id="groomer">$groomers</select></div>
++    <div class="filter"><label for="view-date">View day</label><input id="view-date" type="date" required></div>
++    <div class="day-nav"><button class="button" id="prev" aria-label="Previous day">←</button><button class="button" id="today">Today</button><button class="button" id="next" aria-label="Next day">→</button></div>
++    <p class="local-time">All times are local to the salon.</p>
++  </div>
++  <div id="page-message" class="message" role="status" hidden></div>
++  <div class="columns">
++    <div>
++      <section class="card" aria-labelledby="day-heading">
++        <div class="card-head"><div><h2 id="day-heading">Your day</h2><p id="hours" class="subtle">Loading the schedule…</p></div><span id="date-mark" class="date-mark"></span></div>
++        <div id="agenda" class="agenda" aria-live="polite"></div>
++      </section>
++      <section class="card saved" aria-labelledby="saved-heading">
++        <div class="card-head"><div><h2 id="saved-heading">Saved time off</h2><p class="subtle">One-off dates and weekly routines for this groomer.</p></div></div>
++        <ul id="saved-list" class="saved-list"></ul>
++      </section>
++    </div>
++    <section class="card" aria-labelledby="form-heading">
++      <div class="card-head"><div><h2 id="form-heading">Block some time</h2><p id="form-groomer" class="subtle"></p></div></div>
++      <form id="block-form" class="form-body">
++        <div id="form-message" class="message" role="status" hidden></div>
++        <div class="field"><label for="starts-on">Date</label><input id="starts-on" name="starts_on" type="date" required></div>
++        <div class="two field"><div><label for="start-time">From</label><input id="start-time" name="start_time" type="time" value="12:30" step="60" required></div><div><label for="end-time">To</label><input id="end-time" name="end_time" type="time" value="13:00" step="60" required></div></div>
++        <div class="field"><label for="repeat">Repeat</label><select id="repeat" name="repeat"><option value="once">Does not repeat</option><option value="weekly">Every week</option></select><p id="repeat-hint" class="hint">Just this date.</p></div>
++        <div class="field"><label for="note">Label <span class="subtle">(optional)</span></label><input id="note" name="note" maxlength="120" placeholder="Lunch, personal appointment…" autocomplete="off"><p class="hint">Only visible here. Never added to client reminders.</p></div>
++        <button type="submit" class="button primary" id="save">Save time off</button>
++      </form>
++      <div class="protection"><strong>Existing bookings stay put.</strong> If a booking overlaps, we’ll ask you to move or cancel it first. Weekly time off starts on the date you choose.</div>
++    </section>
++  </div>
++  <footer>Blocks stay in place until you remove them. Overlapping blocks each apply independently.</footer>
++</main>
++<dialog id="remove-dialog" aria-labelledby="remove-heading"><h2 id="remove-heading">Remove time off?</h2><p id="remove-description"></p><p class="subtle">Other blocks and existing bookings still apply.</p><div id="remove-message" class="message error" role="status" hidden></div><div class="dialog-actions"><button id="keep" class="button">Keep it</button><button id="confirm-remove" class="button danger">Remove time off</button></div></dialog>
++<script nonce="$token">
++'use strict';
++const el = id => document.getElementById(id);
++const groomer = el('groomer'), viewDate = el('view-date'), form = el('block-form');
++const token = document.querySelector('meta[name="fernhill-token"]').content;
++let generation = 0, removing = null, writing = false;
++const localISO = date => date.getFullYear() + '-' + String(date.getMonth()+1).padStart(2,'0') + '-' + String(date.getDate()).padStart(2,'0');
++const fromISO = value => new Date(value + 'T12:00:00');
++const prettyDate = value => fromISO(value).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
++const weekday = value => fromISO(value).toLocaleDateString(undefined, {weekday:'long'});
++function node(tag, className, text) { const n=document.createElement(tag); if(className) n.className=className; if(text !== undefined) n.textContent=text; return n; }
++function message(id, text, error=false) { const target=el(id); target.textContent=text; target.hidden=!text; target.classList.toggle('error',error); }
++async function api(path, options={}) {
++  const response = await fetch(path, {...options, headers:{'Content-Type':'application/json','X-Fernhill-Token':token,...options.headers}});
++  let data;
++  try { data = await response.json(); } catch { throw new Error('Could not read the schedule. Refresh and try again.'); }
++  if (!response.ok) throw new Error(data.error || 'Could not update the schedule. Try again.');
++  return data;
++}
++function repeatHint() {
++  const value=el('starts-on').value;
++  el('repeat-hint').textContent=el('repeat').value==='weekly' && value
++    ? 'Every ' + weekday(value) + ', from ' + prettyDate(value) + ' until removed.' : 'Just this date.';
++}
++function renderAgenda(data) {
++  const agenda=el('agenda'); agenda.replaceChildren();
++  el('day-heading').textContent=weekday(viewDate.value);
++  el('date-mark').textContent=prettyDate(viewDate.value);
++  el('hours').textContent=data.hours ? 'Salon open ' + data.hours.join('–') : 'Salon closed · no times offered';
++  const stats=node('div','stats');
++  for (const [text, kind] of [[data.appointments.length + ' appointments',''],[data.blocks.length + ' time-off blocks','break']]) {
++    const stat=node('span'); stat.append(node('i','dot ' + kind),document.createTextNode(text)); stats.append(stat);
++  }
++  agenda.append(stats);
++  const events = data.appointments.map(a => ({start:a.start.slice(11,16), end:a.end.slice(11,16), title:a.dog, detail:a.service, off:false}));
++  events.push(...data.blocks.map(b => ({start:b.start_time,end:b.end_time,title:b.note || 'Time off',detail:b.repeat==='weekly' ? 'Time off · Every ' + weekday(b.starts_on) : 'Time off · Just this date',off:true})));
++  events.sort((a,b) => a.start.localeCompare(b.start));
++  if (!events.length) { const empty=node('div','empty'); empty.append(node('strong','',data.hours ? 'Room to breathe' : 'A day away'),document.createTextNode(data.hours ? 'No appointments or time off on this day.' : 'You can still plan time off for this date.')); agenda.append(empty); }
++  for (const event of events) {
++    const row=node('div','event' + (event.off ? ' off' : '')), detail=node('div','event-main');
++    detail.append(node('p','event-title',event.title),node('p','event-meta',event.detail));
++    row.append(node('div','event-time',event.start + '–' + event.end),detail); agenda.append(row);
++  }
++}
++function renderSaved(blocks) {
++  const list=el('saved-list'); list.replaceChildren();
++  if (!blocks.length) { list.append(node('li','saved-empty','No time off saved yet. Start with a lunch break.')); return; }
++  for (const block of blocks) {
++    const row=node('li','saved-row'), info=node('div','saved-info'), title=node('p');
++    title.append(node('span','tag',block.repeat==='weekly' ? 'Weekly' : 'One-off'),document.createTextNode(block.note || 'Time off'));
++    const when=block.repeat==='weekly' ? 'Every ' + weekday(block.starts_on) + ' · from ' + prettyDate(block.starts_on) : prettyDate(block.starts_on);
++    info.append(title,node('p','saved-detail',when + ' · ' + block.start_time + '–' + block.end_time));
++    const remove=node('button','remove','Remove'); remove.type='button'; remove.disabled=writing;
++    remove.setAttribute('aria-label','Remove ' + (block.note || 'time off') + ' ' + when);
++    remove.addEventListener('click',() => {
++      removing=block;
++      el('remove-description').textContent=block.repeat==='weekly'
++        ? 'Remove every occurrence of “' + (block.note || 'Time off') + '” on ' + weekday(block.starts_on) + 's?'
++        : 'Remove “' + (block.note || 'Time off') + '” on ' + prettyDate(block.starts_on) + '?';
++      message('remove-message',''); el('remove-dialog').showModal(); el('keep').focus();
++    });
++    row.append(info,remove); list.append(row);
++  }
++}
++async function refresh() {
++  const version=++generation;
++  if (!groomer.value || !viewDate.value) return;
++  const query=new URLSearchParams({groomer:groomer.value,date:viewDate.value});
++  el('form-groomer').textContent='For ' + groomer.selectedOptions[0].textContent;
++  el('agenda').setAttribute('aria-busy','true');
++  try {
++    const [schedule,saved]=await Promise.all([api('/api/schedule?' + query),api('/api/time-off?' + query)]);
++    if (version !== generation) return;
++    renderAgenda(schedule); renderSaved(saved.blocks);
++  } catch(error) {
++    if(version !== generation) return;
++    el('agenda').replaceChildren(node('p','empty','Schedule unavailable. Refresh to try again.'));
++    el('saved-list').replaceChildren(); message('page-message',error.message,true);
++  } finally { if(version===generation) el('agenda').removeAttribute('aria-busy'); }
++}
++function setWriting(value) {
++  writing=value;
++  for (const control of document.querySelectorAll('input,select,button')) control.disabled=value;
++  el('save').textContent=value ? 'Saving…' : 'Save time off';
++}
++function changeDay() { if(!viewDate.value) return; el('starts-on').value=viewDate.value; repeatHint(); message('page-message',''); message('form-message',''); refresh(); }
++groomer.addEventListener('change',() => { message('page-message',''); message('form-message',''); refresh(); });
++viewDate.addEventListener('change',changeDay);
++for (const [id,offset] of [['prev',-1],['next',1]]) el(id).addEventListener('click',() => { const d=fromISO(viewDate.value || localISO(new Date())); d.setDate(d.getDate()+offset); viewDate.value=localISO(d); changeDay(); });
++el('today').addEventListener('click',() => { viewDate.value=localISO(new Date()); changeDay(); });
++el('starts-on').addEventListener('change',repeatHint); el('repeat').addEventListener('change',repeatHint);
++form.addEventListener('submit',async event => {
++  event.preventDefault(); if(writing) return;
++  const payload=Object.fromEntries(new FormData(form)); payload.groomer_id=Number(groomer.value);
++  message('form-message',''); message('page-message','');
++  if(payload.start_time >= payload.end_time) { message('form-message','End time must be after start time on the same day.',true); el('end-time').focus(); return; }
++  setWriting(true);
++  try {
++    await api('/api/time-off',{method:'POST',body:JSON.stringify(payload)});
++    viewDate.value=payload.starts_on;
++    message('form-message',payload.repeat==='weekly' ? 'Weekly time off saved. These times are now blocked.' : 'Time off saved. These times are now blocked.');
++    await refresh();
++  } catch(error) { message('form-message',error.message,true); }
++  finally { setWriting(false); }
++});
++el('keep').addEventListener('click',() => el('remove-dialog').close());
++el('remove-dialog').addEventListener('cancel',event => { if(writing) event.preventDefault(); });
++el('confirm-remove').addEventListener('click',async () => {
++  if(!removing || writing) return;
++  setWriting(true); message('page-message','');
++  try {
++    await api('/api/time-off/' + removing.id,{method:'DELETE'});
++    el('remove-dialog').close(); removing=null;
++    message('page-message','Time off removed. Available times have been updated.'); await refresh();
++  } catch(error) { message('remove-message',error.message,true); }
++  finally { setWriting(false); }
++});
++viewDate.value=localISO(new Date()); el('starts-on').value=viewDate.value;
++if (!groomer.options.length) { setWriting(true); el('save').textContent='Save time off'; message('page-message','Add a groomer to the salon before planning time off.',true); }
++else refresh();
++</script>
++</body>
++</html>
+diff --git a/fernhill/staff.py b/fernhill/staff.py
+new file mode 100644
+index 0000000..fc48dd8
+--- /dev/null
++++ b/fernhill/staff.py
+@@ -0,0 +1,105 @@
++"""Local-only staff app. Deliberately separate from the public booking WSGI app."""
++from __future__ import annotations
++
++import json
++import secrets
++import sqlite3
++from html import escape
++from pathlib import Path
++from string import Template
++from urllib.parse import parse_qs, urlsplit
++
++from . import scheduling, time_off
++from .db import salon
++
++
++def make_app(conn: sqlite3.Connection):
++    token = secrets.token_urlsafe(32)
++    template = Template(Path(__file__).with_name("staff.html").read_text(encoding="utf-8"))
++
++    def app(environ, start_response):
++        def reply(status, body, content_type="application/json"):
++            data = (body if isinstance(body, str) else json.dumps(body)).encode("utf-8")
++            start_response(status, [("Content-Type", content_type + "; charset=utf-8"),
++                                    ("Content-Length", str(len(data))),
++                                    ("Cache-Control", "no-store"),
++                                    ("X-Content-Type-Options", "nosniff"),
++                                    ("X-Frame-Options", "DENY"),
++                                    ("Content-Security-Policy", "default-src 'self'; "
++                                     "script-src 'nonce-" + token + "'; style-src 'unsafe-inline'; "
++                                     "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")])
++            return [data]
++
++        # Prevent DNS rebinding of the loopback server, in addition to the mutation
++        # token below. No CORS headers are supplied, so other sites cannot read it.
++        try:
++            host = urlsplit("//" + environ.get("HTTP_HOST", "")).hostname
++        except ValueError:
++            host = None
++        if host not in ("localhost", "127.0.0.1", "::1"):
++            return reply("403 Forbidden", {"error": "Use the localhost staff address."})
++        method, path = environ["REQUEST_METHOD"], environ.get("PATH_INFO", "/")
++        if method not in ("GET", "POST", "DELETE"):
++            return reply("405 Method Not Allowed", {"error": "Method not allowed."})
++        if method in ("POST", "DELETE") and not secrets.compare_digest(
++                environ.get("HTTP_X_FERNHILL_TOKEN", "").encode("utf-8"), token.encode("ascii")):
++            return reply("403 Forbidden", {"error": "Refresh the staff page and try again."})
++
++        try:
++            q = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
++            if method == "GET" and path == "/":
++                options = "".join(
++                    f'<option value="{row["id"]}">{escape(row["name"])}</option>'
++                    for row in conn.execute("SELECT * FROM groomers ORDER BY name, id"))
++                return reply("200 OK", template.substitute(
++                    salon=escape(salon(conn)["name"]), groomers=options, token=token), "text/html")
++            if method == "GET" and path == "/api/time-off":
++                rows = time_off.list_blocks(conn, int(q["groomer"]))
++                return reply("200 OK", {"blocks": [dict(row) for row in rows]})
++            if method == "GET" and path == "/api/schedule":
++                groomer_id, day = int(q["groomer"]), time_off.parse_day(q["date"])
++                blocks = time_off.list_blocks(conn, groomer_id)
++                hours = scheduling.hours(conn, day)
++                # Filter on the ID, not the display name: groomers can share names.
++                rows = conn.execute(
++                    "SELECT a.id, a.start, a.end, d.name AS dog, s.name AS service"
++                    " FROM appointments a JOIN dogs d ON d.id = a.dog_id"
++                    " JOIN services s ON s.id = a.service_id"
++                    " WHERE a.groomer_id = ? AND a.status = 'booked' AND substr(a.start, 1, 10) = ?"
++                    " ORDER BY a.start", (groomer_id, day.isoformat()))
++                appointments = [dict(row) for row in rows]
++                return reply("200 OK", {
++                    "hours": [h.strftime("%H:%M") for h in hours] if hours else None,
++                    "appointments": appointments,
++                    "blocks": [dict(row) for row in blocks if time_off.applies(row, day)]})
++            if method == "POST" and path == "/api/time-off":
++                if environ.get("CONTENT_TYPE", "").split(";", 1)[0].strip() != "application/json":
++                    return reply("415 Unsupported Media Type", {"error": "Send JSON."})
++                length = int(environ.get("CONTENT_LENGTH") or 0)
++                if length < 1 or length > 4096:
++                    return reply("413 Content Too Large", {"error": "Send a block smaller than 4 KB."})
++                body = json.loads(environ["wsgi.input"].read(length))
++                if not isinstance(body, dict):
++                    raise time_off.TimeOffError("Send one time-off block.")
++                block_id = time_off.add_block(
++                    conn, body["groomer_id"], body["starts_on"], body["start_time"],
++                    body["end_time"], body.get("repeat", "once"), body.get("note", ""))
++                return reply("201 Created", {"id": block_id})
++            if method == "DELETE" and path.startswith("/api/time-off/"):
++                time_off.remove_block(conn, int(path.removeprefix("/api/time-off/")))
++                return reply("200 OK", {"removed": True})
++            return reply("404 Not Found", {"error": "Not found."})
++        except time_off.TimeOffConflict as exc:
++            return reply("409 Conflict", {"error": str(exc)})
++        except time_off.TimeOffError as exc:
++            return reply("400 Bad Request", {"error": str(exc)})
++        except (KeyError, ValueError, TypeError):
++            return reply("400 Bad Request", {"error": "Check the groomer, date, and times and try again."})
++        except LookupError as exc:
++            return reply("404 Not Found", {"error": str(exc)})
++        except sqlite3.OperationalError as exc:
++            if "locked" not in str(exc).lower():
++                raise
++            return reply("503 Service Unavailable", {"error": "The schedule is busy. Try again shortly."})
++
++    return app
+diff --git a/fernhill/time_off.py b/fernhill/time_off.py
+new file mode 100644
+index 0000000..7caf4f1
+--- /dev/null
++++ b/fernhill/time_off.py
+@@ -0,0 +1,115 @@
++"""One-off and weekly groomer time off, expressed in the salon's local time."""
++from __future__ import annotations
++
++import sqlite3
++from datetime import date, datetime, time
++
++from .db import schedule_write
++
++
++class TimeOffError(ValueError):
++    """Invalid time-off input; safe to show to the staff member."""
++
++
++class TimeOffConflict(TimeOffError):
++    """A block would overlap an existing booked appointment."""
++
++
++def groomer_exists(conn: sqlite3.Connection, groomer_id: int) -> None:
++    if type(groomer_id) is not int or groomer_id < 1:
++        raise TimeOffError("Choose a groomer.")
++    if conn.execute("SELECT 1 FROM groomers WHERE id = ?", (groomer_id,)).fetchone() is None:
++        raise TimeOffError("That groomer doesn't exist.")
++
++
++def parse_day(value: str) -> date:
++    try:
++        result = date.fromisoformat(value)
++        if result.isoformat() == value:
++            return result
++    except (TypeError, ValueError):
++        pass
++    raise TimeOffError("Choose a date in YYYY-MM-DD format.")
++
++
++def parse_time(value: str) -> time:
++    try:
++        result = time.fromisoformat(value)
++        if result.tzinfo is None and result.isoformat(timespec="minutes") == value:
++            return result
++    except (TypeError, ValueError):
++        pass
++    raise TimeOffError("Use a local time in HH:MM format.")
++
++
++def applies(block, day: date) -> bool:
++    first = date.fromisoformat(block["starts_on"])
++    return day == first or (block["repeat"] == "weekly" and day >= first
++                            and day.weekday() == first.weekday())
++
++
++def list_blocks(conn: sqlite3.Connection, groomer_id: int) -> list[sqlite3.Row]:
++    groomer_exists(conn, groomer_id)
++    return conn.execute(
++        "SELECT * FROM time_off WHERE groomer_id = ? ORDER BY starts_on, start_time, id",
++        (groomer_id,)).fetchall()
++
++
++def intervals(conn: sqlite3.Connection, groomer_id: int,
++              day: date) -> list[tuple[datetime, datetime]]:
++    rows = conn.execute(
++        "SELECT * FROM time_off WHERE groomer_id = ? AND starts_on <= ?"
++        " AND (repeat = 'weekly' OR starts_on = ?)",
++        (groomer_id, day.isoformat(), day.isoformat()))
++    return [(datetime.combine(day, time.fromisoformat(r["start_time"])),
++             datetime.combine(day, time.fromisoformat(r["end_time"])))
++            for r in rows if applies(r, day)]
++
++
++def add_block(conn: sqlite3.Connection, groomer_id: int, starts_on: str,
++              start_time: str, end_time: str, repeat: str = "once", note: str = "") -> int:
++    """Create a block; weekly blocks start on starts_on and recur until removed.
++
++    Existing appointments are never moved/cancelled. Any booked appointment on an
++    affected date rejects the whole block. Overlapping blocks are allowed; removing
++    one leaves the others in force. Times must be within one calendar day.
++    """
++    first = parse_day(starts_on)
++    start, end = parse_time(start_time), parse_time(end_time)
++    if start >= end:
++        raise TimeOffError("End time must be after start time on the same day.")
++    if repeat not in ("once", "weekly"):
++        raise TimeOffError("Choose once or weekly.")
++    if not isinstance(note, str) or len(note.strip()) > 120:
++        raise TimeOffError("Keep the note to 120 characters or fewer.")
++    note = note.strip()
++    if any(ord(c) < 32 or ord(c) == 127 for c in note):
++        raise TimeOffError("Keep the note on one line.")
++    block = {"starts_on": starts_on, "repeat": repeat}
++    with schedule_write(conn):
++        groomer_exists(conn, groomer_id)
++        rows = conn.execute(
++            "SELECT start, end FROM appointments WHERE groomer_id = ? AND status = 'booked'"
++            " AND end > ? ORDER BY start", (groomer_id, first.isoformat()))
++        for row in rows:
++            booked_start, booked_end = (datetime.fromisoformat(row[key]) for key in ("start", "end"))
++            day = booked_start.date()
++            if applies(block, day) and (datetime.combine(day, start) < booked_end
++                                       and booked_start < datetime.combine(day, end)):
++                raise TimeOffConflict(
++                    f"This overlaps a booked appointment on {day:%Y-%m-%d} at {booked_start:%H:%M}. "
++                    "Move or cancel that appointment before adding time off.")
++        cur = conn.execute(
++            "INSERT INTO time_off (groomer_id, starts_on, start_time, end_time, repeat, note)"
++            " VALUES (?, ?, ?, ?, ?, ?)",
++            (groomer_id, starts_on, start_time, end_time, repeat, note))
++        return cur.lastrowid
++
++
++def remove_block(conn: sqlite3.Connection, block_id: int) -> None:
++    if type(block_id) is not int or block_id < 1:
++        raise TimeOffError("Choose a saved block.")
++    with schedule_write(conn):
++        cur = conn.execute("DELETE FROM time_off WHERE id = ?", (block_id,))
++        if cur.rowcount == 0:
++            raise LookupError("That block no longer exists. Refresh the list.")
+diff --git a/tests/test_staff.py b/tests/test_staff.py
+new file mode 100644
+index 0000000..d908efd
+--- /dev/null
++++ b/tests/test_staff.py
+@@ -0,0 +1,197 @@
++import io
++import json
++import re
++import unittest
++from unittest.mock import patch
++
++from fernhill import scheduling, staff, time_off, web
++from fernhill.__main__ import main
++
++from .fixtures import TUESDAY, at, salon_db
++from .test_web import call as public_call
++
++
++def call(app, method="GET", path="/", query="", body=None, token="", host="127.0.0.1:8001",
++         content_type="application/json", raw=None, length=None):
++    data = raw if raw is not None else (json.dumps(body).encode() if body is not None else b"")
++    environ = {"REQUEST_METHOD": method, "PATH_INFO": path, "QUERY_STRING": query,
++               "HTTP_HOST": host, "CONTENT_TYPE": content_type, "HTTP_X_FERNHILL_TOKEN": token,
++               "CONTENT_LENGTH": str(len(data) if length is None else length),
++               "wsgi.input": io.BytesIO(data)}
++    result = {}
++
++    def start_response(status, headers):
++        result.update(status=int(status.split()[0]), headers=dict(headers))
++
++    result["body"] = b"".join(app(environ, start_response)).decode()
++    return result
++
++
++class StaffTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++        self.app = staff.make_app(self.conn)
++        page = call(self.app)
++        self.token = re.search(r'name="fernhill-token" content="([^"]+)"', page["body"])[1]
++        self.block = dict(groomer_id=1, starts_on="2026-10-13", start_time="12:30",
++                          end_time="13:00", repeat="weekly", note="Lunch")
++
++    def create(self, **kwargs):
++        return call(self.app, "POST", "/api/time-off", body={**self.block, **kwargs}, token=self.token)
++
++    def test_page_names_salon_and_groomers_and_has_protective_headers(self):
++        result = call(self.app)
++        self.assertEqual(result["status"], 200)
++        self.assertIn("Test Salon · Staff", result["body"])
++        self.assertIn('value="1">Jess</option>', result["body"])
++        self.assertEqual(result["headers"]["Cache-Control"], "no-store")
++        self.assertIn("frame-ancestors 'none'", result["headers"]["Content-Security-Policy"])
++        self.assertIn("nonce-" + self.token, result["headers"]["Content-Security-Policy"])
++        self.assertNotIn("Access-Control-Allow-Origin", result["headers"])
++
++    def test_names_are_escaped_in_html(self):
++        self.conn.execute("UPDATE salon SET name = '<script>alert(1)</script>'")
++        self.conn.execute("UPDATE groomers SET name = '<img src=x onerror=alert(1)>'")
++        self.conn.commit()
++        html = call(self.app)["body"]
++        self.assertIn("&lt;script&gt;", html)
++        self.assertIn("&lt;img", html)
++        self.assertNotIn("<img src=x", html)
++
++    def test_create_list_and_remove(self):
++        created = self.create()
++        self.assertEqual(created["status"], 201)
++        block_id = json.loads(created["body"])["id"]
++        listed = call(self.app, path="/api/time-off", query="groomer=1")
++        self.assertEqual(listed["status"], 200)
++        self.assertEqual(json.loads(listed["body"])["blocks"], [{"id": block_id, **self.block}])
++        removed = call(self.app, "DELETE", f"/api/time-off/{block_id}", token=self.token)
++        self.assertEqual(removed["status"], 200)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++        self.assertEqual(call(self.app, "DELETE", f"/api/time-off/{block_id}", token=self.token)["status"], 404)
++
++    def test_public_app_never_serves_staff_page_or_mutations(self):
++        app = web.make_app(self.conn)
++        for method, path in [("GET", "/staff"), ("GET", "/api/time-off"),
++                             ("POST", "/api/time-off"), ("DELETE", "/api/time-off/1")]:
++            with self.subTest(method=method, path=path):
++                self.assertEqual(public_call(app, method, path, body=self.block)[0], 404)
++
++    def test_public_booking_respects_staff_blocks(self):
++        self.assertEqual(self.create()["status"], 201)
++        app = web.make_app(self.conn)
++        for day in ["2026-10-13", "2026-10-20"]:
++            with self.subTest(day=day):
++                code, response = public_call(app, "GET", "/api/slots",
++                                            f"groomer=1&service=1&size=small&date={day}")
++                self.assertEqual(code, 200)
++                self.assertNotIn("12:00", json.loads(response)["slots"])
++                code, response = public_call(app, "POST", "/api/appointments", body={
++                    "dog_id": 1, "groomer_id": 1, "service_id": 1, "start": day + "T12:00"})
++                self.assertEqual(code, 409)
++                self.assertIn("time off", json.loads(response)["error"])
++
++    def test_conflict_is_actionable_and_preserves_appointment(self):
++        scheduling.book(self.conn, 1, 1, 1, at(12))
++        result = self.create()
++        self.assertEqual(result["status"], 409)
++        self.assertIn("Move or cancel", json.loads(result["body"])["error"])
++        self.assertEqual(len(scheduling.day_sheet(self.conn, TUESDAY)), 1)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++
++    def test_schedule_has_only_selected_groomer_and_date(self):
++        self.conn.execute("UPDATE groomers SET name = 'Jess'")  # duplicate names are valid
++        self.conn.commit()
++        self.create()
++        scheduling.book(self.conn, 1, 1, 1, at(9))
++        scheduling.book(self.conn, 3, 2, 1, at(10))
++        result = call(self.app, path="/api/schedule", query="groomer=1&date=2026-10-13")
++        data = json.loads(result["body"])
++        self.assertEqual(result["status"], 200)
++        self.assertEqual(data["hours"], ["09:00", "17:00"])
++        self.assertEqual([a["dog"] for a in data["appointments"]], ["Biscuit"])
++        self.assertEqual([b["note"] for b in data["blocks"]], ["Lunch"])
++        next_week = json.loads(call(self.app, path="/api/schedule", query="groomer=1&date=2026-10-20")["body"])
++        self.assertEqual(next_week["appointments"], [])
++        self.assertEqual(len(next_week["blocks"]), 1)
++        closed = json.loads(call(self.app, path="/api/schedule", query="groomer=1&date=2026-10-12")["body"])
++        self.assertIsNone(closed["hours"])
++        self.assertEqual(closed["blocks"], [])
++
++    def test_cross_site_requests_cannot_write(self):
++        for token in ["", "wrong", "a" * 43, "café"]:
++            with self.subTest(token=token):
++                self.assertEqual(call(self.app, "POST", "/api/time-off", body=self.block, token=token)["status"], 403)
++                self.assertEqual(call(self.app, "DELETE", "/api/time-off/1", token=token)["status"], 403)
++        self.assertEqual(call(self.app, "OPTIONS", "/api/time-off")["status"], 405)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++
++    def test_host_restriction_blocks_rebinding(self):
++        for host in ["evil.example", "127.0.0.1.evil.example:8001", "", "[invalid"]:
++            with self.subTest(host=host):
++                self.assertEqual(call(self.app, host=host)["status"], 403)
++        for host in ["localhost:8001", "127.0.0.1:8001", "[::1]:8001"]:
++            with self.subTest(host=host):
++                self.assertEqual(call(self.app, host=host)["status"], 200)
++
++    def test_app_restart_invalidates_old_token(self):
++        other = staff.make_app(self.conn)
++        self.assertEqual(call(other, "POST", "/api/time-off", body=self.block, token=self.token)["status"], 403)
++
++    def test_invalid_payloads_return_json_errors_not_server_errors(self):
++        payloads = [None, [], "bad", {}, {**self.block, "groomer_id": None},
++                    {**self.block, "groomer_id": 1.5}, {**self.block, "groomer_id": True},
++                    {**self.block, "start_time": []}, {**self.block, "note": {}},
++                    {**self.block, "repeat": ["weekly"]}, {**self.block, "starts_on": "2026-13-01"}]
++        for body in payloads:
++            with self.subTest(body=body):
++                result = call(self.app, "POST", "/api/time-off", raw=json.dumps(body).encode(), token=self.token)
++                self.assertEqual(result["status"], 400)
++                self.assertIn("error", json.loads(result["body"]))
++        for raw in [b"{", b"\xff"]:
++            with self.subTest(raw=raw):
++                self.assertEqual(call(self.app, "POST", "/api/time-off", raw=raw, token=self.token)["status"], 400)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++
++    def test_content_type_and_body_size_are_limited(self):
++        for length in [0, -1, 4097]:
++            with self.subTest(length=length):
++                self.assertEqual(call(self.app, "POST", "/api/time-off", body=self.block,
++                                      token=self.token, length=length)["status"], 413)
++        self.assertEqual(call(self.app, "POST", "/api/time-off", body=self.block,
++                              token=self.token, content_type="text/plain")["status"], 415)
++        self.assertEqual(call(self.app, "POST", "/api/time-off", body=self.block,
++                              token=self.token, length="no")["status"], 400)
++
++    def test_invalid_queries_routes_and_ids(self):
++        for path, query in [("/api/time-off", ""), ("/api/time-off", "groomer=no"),
++                            ("/api/time-off", "groomer=99"), ("/api/schedule", "groomer=1&date=no")]:
++            with self.subTest(path=path, query=query):
++                self.assertEqual(call(self.app, path=path, query=query)["status"], 400)
++        self.assertEqual(call(self.app, path="/missing")["status"], 404)
++        self.assertEqual(call(self.app, "DELETE", "/api/time-off/no", token=self.token)["status"], 400)
++        self.assertEqual(call(self.app, "PUT", "/api/time-off", token=self.token)["status"], 405)
++
++    def test_sqlite_contention_has_retry_message(self):
++        import sqlite3
++        with patch("fernhill.time_off.add_block", side_effect=sqlite3.OperationalError("database is locked")):
++            result = self.create()
++        self.assertEqual(result["status"], 503)
++        self.assertIn("Try again", json.loads(result["body"])["error"])
++
++
++class StaffCommandTest(unittest.TestCase):
++    def test_staff_binds_loopback_and_uses_its_own_app(self):
++        with patch("fernhill.__main__.db.connect") as connect, \
++                patch("fernhill.__main__.staff.make_app") as app, \
++                patch("fernhill.__main__.make_server") as server:
++            main(["--db", "chosen.db", "staff", "--port", "8999"])
++            connect.assert_called_once_with("chosen.db")
++            app.assert_called_once_with(connect.return_value)
++            server.assert_called_once_with("127.0.0.1", 8999, app.return_value)
++            server.return_value.serve_forever.assert_called_once_with()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_time_off.py b/tests/test_time_off.py
+new file mode 100644
+index 0000000..c8672a5
+--- /dev/null
++++ b/tests/test_time_off.py
+@@ -0,0 +1,294 @@
++"""Scheduling guarantees shared by the staff tool and the public booking API."""
++import sqlite3
++import tempfile
++import threading
++import unittest
++from datetime import date, timedelta
++from pathlib import Path
++
++from fernhill import db, reminders, scheduling, time_off
++
++from .fixtures import TUESDAY, at, salon_db
++
++
++class TimeOffTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++
++    def add(self, **kwargs):
++        params = dict(groomer_id=1, starts_on=TUESDAY.isoformat(), start_time="12:30",
++                      end_time="13:00", repeat="once", note="Lunch")
++        params.update(kwargs)
++        return time_off.add_block(self.conn, **params)
++
++    def slots(self, day=TUESDAY, groomer=1, size="small"):
++        return scheduling.available_slots(self.conn, groomer, 1, size, day)
++
++    def test_one_off_hides_starts_and_appointments_that_run_into_it(self):
++        self.add()
++        self.assertNotIn(at(12), self.slots())  # 45-minute service overlaps lunch
++        self.assertNotIn(at(12, 30), self.slots())
++        self.assertIn(at(11, 30), self.slots())
++        self.assertIn(at(13), self.slots())
++        self.assertIn(at(12, day=TUESDAY + timedelta(days=7)), self.slots(TUESDAY + timedelta(days=7)))
++
++    def test_long_service_starting_before_block_is_hidden(self):
++        self.add()
++        self.assertNotIn(at(11, 30), self.slots(size="large"))  # ends at 13:00
++        self.assertIn(at(11), self.slots(size="large"))  # ends exactly at 12:30
++
++    def test_direct_booking_cannot_bypass_one_off_block(self):
++        self.add()
++        for h, m in [(12, 0), (12, 30), (12, 45)]:
++            with self.subTest(start=(h, m)), self.assertRaisesRegex(scheduling.BookingError, "time off"):
++                scheduling.book(self.conn, 1, 1, 1, at(h, m))
++        self.assertEqual(scheduling.day_sheet(self.conn, TUESDAY), [])
++
++    def test_exact_boundaries_are_allowed(self):
++        self.add()
++        scheduling.book(self.conn, 1, 1, 1, at(11, 45))  # ends exactly at 12:30
++        scheduling.book(self.conn, 1, 1, 1, at(13))
++        self.assertEqual(len(scheduling.day_sheet(self.conn, TUESDAY)), 2)
++
++    def test_groomers_are_independent(self):
++        self.add()
++        self.assertIn(at(12, 30), self.slots(groomer=2))
++        scheduling.book(self.conn, 1, 2, 1, at(12, 30))
++
++    def test_weekly_recurrence_has_a_start_date_and_correct_weekday(self):
++        self.add(repeat="weekly")
++        for day in [TUESDAY, TUESDAY + timedelta(days=7), TUESDAY + timedelta(days=364)]:
++            with self.subTest(day=day):
++                self.assertNotIn(at(12, day=day), self.slots(day))
++                with self.assertRaisesRegex(scheduling.BookingError, "time off"):
++                    scheduling.book(self.conn, 1, 1, 1, at(12, day=day))
++        for day in [TUESDAY - timedelta(days=7), TUESDAY + timedelta(days=1)]:
++            with self.subTest(day=day):
++                self.assertIn(at(12, day=day), self.slots(day))
++
++    def test_weekly_recurrence_crosses_year_and_leap_day(self):
++        self.add(starts_on="2028-02-22", repeat="weekly")
++        for day in [date(2028, 2, 29), date(2029, 1, 2)]:
++            self.assertNotIn(at(12, day=day), self.slots(day))
++
++    def test_all_day_and_closed_day_blocks_are_allowed(self):
++        self.add(start_time="00:00", end_time="23:59")
++        self.assertEqual(self.slots(), [])
++        self.add(starts_on="2026-10-12", start_time="00:00", end_time="23:59")
++        self.assertEqual(len(time_off.list_blocks(self.conn, 1)), 2)
++
++    def test_multiple_and_overlapping_blocks_remain_independent(self):
++        first = self.add()
++        second = self.add(start_time="12:45", end_time="13:30")
++        time_off.remove_block(self.conn, first)
++        self.assertNotIn(at(12, 30), self.slots())
++        self.assertNotIn(at(13), self.slots())
++        time_off.remove_block(self.conn, second)
++        self.assertIn(at(12, 30), self.slots())
++        self.assertIn(at(13), self.slots())
++
++    def test_removing_weekly_block_frees_all_occurrences(self):
++        block_id = self.add(repeat="weekly")
++        time_off.remove_block(self.conn, block_id)
++        for day in [TUESDAY, TUESDAY + timedelta(days=7)]:
++            self.assertIn(at(12, 30, day=day), self.slots(day))
++
++    def test_removing_block_never_removes_appointment(self):
++        block_id = self.add()
++        scheduling.book(self.conn, 1, 1, 1, at(10))
++        time_off.remove_block(self.conn, block_id)
++        self.assertNotIn(at(10), self.slots())
++        self.assertEqual(len(scheduling.day_sheet(self.conn, TUESDAY)), 1)
++
++    def test_blocks_never_appear_in_day_sheet_or_reminders(self):
++        self.add(repeat="weekly", note="Private appointment")
++        self.assertEqual(scheduling.day_sheet(self.conn, TUESDAY), [])
++        self.assertEqual(reminders.reminders_for(self.conn, TUESDAY), [])
++        self.assertEqual(self.conn.execute("SELECT count(*) FROM appointments").fetchone()[0], 0)
++        scheduling.book(self.conn, 1, 1, 1, at(9))
++        self.assertEqual(len(scheduling.day_sheet(self.conn, TUESDAY)), 1)
++        self.assertEqual(len(reminders.reminders_for(self.conn, TUESDAY)), 1)
++        self.assertNotIn("Private", reminders.reminders_for(self.conn, TUESDAY)[0].text)
++
++    def test_one_off_rejects_existing_bookings_without_changing_them(self):
++        appointment = scheduling.book(self.conn, 1, 1, 1, at(12))
++        with self.assertRaisesRegex(time_off.TimeOffConflict, "2026-10-13 at 12:00"):
++            self.add()
++        self.assertFalse(self.conn.in_transaction)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++        self.assertEqual(scheduling.day_sheet(self.conn, TUESDAY)[0]["id"], appointment)
++        scheduling.cancel(self.conn, appointment)
++        self.add()  # a failed transaction doesn't poison the next write
++
++    def test_weekly_block_checks_all_future_booked_occurrences(self):
++        day = TUESDAY + timedelta(days=70)
++        scheduling.book(self.conn, 1, 1, 1, at(12, day=day))
++        with self.assertRaisesRegex(time_off.TimeOffConflict, day.isoformat()):
++            self.add(repeat="weekly")
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++
++    def test_weekly_block_ignores_bookings_before_start_or_other_weekdays(self):
++        for day in [TUESDAY - timedelta(days=7), TUESDAY + timedelta(days=1)]:
++            scheduling.book(self.conn, 1, 1, 1, at(12, day=day))
++        self.add(repeat="weekly")
++
++    def test_one_off_ignores_bookings_on_other_dates_or_groomers(self):
++        scheduling.book(self.conn, 1, 1, 1, at(12, day=TUESDAY + timedelta(days=7)))
++        scheduling.book(self.conn, 1, 2, 1, at(12))
++        self.add()
++
++    def test_bookings_touching_block_boundaries_do_not_conflict(self):
++        scheduling.book(self.conn, 1, 1, 1, at(11, 45))
++        scheduling.book(self.conn, 1, 1, 1, at(13))
++        self.add()
++
++    def test_cancelled_and_done_appointments_do_not_prevent_block(self):
++        for status in ["cancelled", "done"]:
++            with self.subTest(status=status):
++                appointment = scheduling.book(self.conn, 1, 1, 1, at(12))
++                self.conn.execute("UPDATE appointments SET status = ? WHERE id = ?", (status, appointment))
++                self.conn.commit()
++                block_id = self.add()
++                time_off.remove_block(self.conn, block_id)
++
++    def test_list_is_ordered_and_scoped_to_groomer(self):
++        late = self.add(start_time="14:00", end_time="15:00", note=" Vet ")
++        early = self.add()
++        self.add(groomer_id=2)
++        rows = time_off.list_blocks(self.conn, 1)
++        self.assertEqual([r["id"] for r in rows], [early, late])
++        self.assertEqual(rows[1]["note"], "Vet")
++
++    def test_invalid_block_inputs_do_not_write(self):
++        invalid = [
++            {"groomer_id": 99}, {"groomer_id": 0}, {"groomer_id": True}, {"groomer_id": "1"},
++            {"groomer_id": 1.1}, {"starts_on": "2026-02-30"}, {"starts_on": "20261013"},
++            {"starts_on": None}, {"starts_on": "2026-W42-2"}, {"starts_on": []},
++            {"start_time": "9:00"}, {"start_time": "12:30:00"}, {"start_time": "12:30+01:00"},
++            {"end_time": "24:00"}, {"start_time": None}, {"end_time": "12:30"},
++            {"start_time": "22:00", "end_time": "01:00"}, {"repeat": "daily"},
++            {"repeat": None}, {"note": "x" * 121}, {"note": None}, {"note": "Lunch\nVet"},
++        ]
++        for params in invalid:
++            with self.subTest(params=params), self.assertRaises(time_off.TimeOffError):
++                self.add(**params)
++        self.assertEqual(time_off.list_blocks(self.conn, 1), [])
++
++    def test_unicode_and_markup_are_stored_as_text(self):
++        note = '<script>alert("café 🐾")</script>'
++        self.add(note=note)
++        self.assertEqual(time_off.list_blocks(self.conn, 1)[0]["note"], note)
++
++    def test_unknown_groomer_and_deleted_block_have_clear_errors(self):
++        with self.assertRaises(time_off.TimeOffError):
++            time_off.list_blocks(self.conn, 404)
++        with self.assertRaises(LookupError):
++            time_off.remove_block(self.conn, 404)
++        for value in [0, True, "1"]:
++            with self.subTest(value=value), self.assertRaises(time_off.TimeOffError):
++                time_off.remove_block(self.conn, value)
++
++
++class PersistentTimeOffTest(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.path = str(Path(self.temp.name) / "salon.db")
++        conn = salon_db()
++        target = sqlite3.connect(self.path)
++        conn.backup(target)
++        conn.close()
++        target.close()
++
++    def test_existing_database_upgrades_idempotently_without_losing_bookings(self):
++        conn = db.connect(self.path)
++        scheduling.book(conn, 1, 1, 1, at(9))
++        # Simulate the legacy database, which has all original tables but no time_off.
++        conn.execute("DROP TABLE time_off")
++        conn.commit()
++        original = list(conn.execute("SELECT * FROM appointments"))[0]
++        conn.close()
++        for _ in range(2):
++            conn = db.connect(self.path)
++            self.assertEqual(tuple(conn.execute("SELECT * FROM appointments").fetchone()), tuple(original))
++            self.assertEqual(conn.execute("SELECT count(*) FROM groomers").fetchone()[0], 2)
++            self.assertEqual(time_off.list_blocks(conn, 1), [])
++            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
++            conn.close()
++        conn = db.connect(self.path)
++        time_off.add_block(conn, 1, "2026-10-13", "12:30", "13:00", "weekly", "Lunch")
++        conn.close()
++        conn = db.connect(self.path)
++        self.assertEqual(time_off.list_blocks(conn, 1)[0]["note"], "Lunch")
++        self.assertNotIn(at(12, 30), scheduling.available_slots(conn, 1, 1, "small", TUESDAY))
++        conn.close()
++
++    def test_booking_waits_for_staff_write_and_then_sees_block(self):
++        conn = db.connect(self.path)
++        self.addCleanup(conn.close)
++        conn.execute("BEGIN IMMEDIATE")
++        conn.execute("INSERT INTO time_off (groomer_id, starts_on, start_time, end_time, repeat)"
++                     " VALUES (1, '2026-10-13', '12:30', '13:00', 'once')")
++        attempted, finished = threading.Event(), threading.Event()
++        outcome = []
++
++        def booking():
++            other = db.connect(self.path)
++            other.set_trace_callback(lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None)
++            try:
++                scheduling.book(other, 1, 1, 1, at(12, 30))
++                outcome.append("booked")
++            except Exception as exc:
++                outcome.append(exc)
++            finally:
++                other.close()
++                finished.set()
++
++        worker = threading.Thread(target=booking, daemon=True)
++        worker.start()
++        try:
++            self.assertTrue(attempted.wait(2), "booking never attempted to acquire its write lock")
++            self.assertFalse(finished.is_set(), "booking read availability before staff committed")
++        finally:
++            conn.commit()
++            worker.join(5)
++        self.assertFalse(worker.is_alive())
++        self.assertIsInstance(outcome[0], scheduling.BookingError)
++        self.assertIn("time off", str(outcome[0]))
++        self.assertEqual(conn.execute("SELECT count(*) FROM appointments").fetchone()[0], 0)
++
++    def test_staff_waits_for_booking_write_and_then_rejects_conflict(self):
++        conn = db.connect(self.path)
++        self.addCleanup(conn.close)
++        conn.execute("BEGIN IMMEDIATE")
++        conn.execute("INSERT INTO appointments (dog_id, groomer_id, service_id, start, end)"
++                     " VALUES (1, 1, 1, '2026-10-13T12:00', '2026-10-13T12:45')")
++        attempted = threading.Event()
++        outcome = []
++
++        def staff_write():
++            other = db.connect(self.path)
++            other.set_trace_callback(lambda sql: attempted.set() if sql == "BEGIN IMMEDIATE" else None)
++            try:
++                time_off.add_block(other, 1, "2026-10-13", "12:30", "13:00")
++                outcome.append("saved")
++            except Exception as exc:
++                outcome.append(exc)
++            finally:
++                other.close()
++
++        worker = threading.Thread(target=staff_write, daemon=True)
++        worker.start()
++        try:
++            self.assertTrue(attempted.wait(2))
++        finally:
++            conn.commit()
++            worker.join(5)
++        self.assertFalse(worker.is_alive())
++        self.assertIsInstance(outcome[0], time_off.TimeOffConflict)
++        self.assertEqual(time_off.list_blocks(conn, 1), [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.39.5 (Apple Git-154)
+

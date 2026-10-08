@@ -1,0 +1,433 @@
+From 7a8bd8572bb2060afb0db8082f8898a8d1aa1503 Mon Sep 17 00:00:00 2001
+From: Ari Wilson <ari.wilson@gmail.com>
+Date: Wed, 7 Oct 2026 21:28:01 -0700
+Subject: [PATCH] Add a Download CSV link to the staff screen for bookkeepers
+ (#1)
+
+Pick a From and To date on the local staff screen and download every
+appointment in that range, one row each: date, start, end, groomer,
+client, dog, service, price, status. One route on the existing staff
+app, GET /export.csv?from=&to=, so nothing new to run.
+
+The file is UTF-8 with a BOM, CRLF and standard CSV quoting so names
+with commas, quotes and accents open cleanly in Excel and Google
+Sheets. Names starting with = + - @ get a leading apostrophe so a
+spreadsheet shows them as text. Prices are the service's current
+price; Fernhill does not store what was charged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md            |  19 +++++-
+ fernhill/export.py   |  85 ++++++++++++++++++++++++
+ fernhill/staff.html  |  37 +++++++----
+ fernhill/staff.py    |  22 +++++--
+ tests/test_export.py | 149 +++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 292 insertions(+), 20 deletions(-)
+ create mode 100644 fernhill/export.py
+ create mode 100644 tests/test_export.py
+
+diff --git a/README.md b/README.md
+index a9e50e6..66acef9 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,7 @@ One salon per database. Python 3.11+, standard library only.
+ ```sh
+ python3 -m fernhill seed                      # a demo salon with bookings on the next open day
+ python3 -m fernhill serve                     # the booking page on http://localhost:8000/
+-python3 -m fernhill staff                     # local time-off manager on http://127.0.0.1:8001/
++python3 -m fernhill staff                     # local staff screen (time off, CSV export) on http://127.0.0.1:8001/
+ python3 -m fernhill day --date 2026-10-13     # the day sheet
+ python3 -m fernhill reminders --date 2026-10-13
+ python3 -m unittest                           # the tests
+@@ -24,7 +24,8 @@ python3 -m unittest                           # the tests
+ | `fernhill/reminders.py` | the day-before texts (the server's 5pm cron pipes them to the SMS gateway) |
+ | `fernhill/web.py` | the booking page and the JSON API |
+ | `fernhill/time_off.py` | one-off and weekly groomer blocks, enforced by scheduling |
+-| `fernhill/staff.py`, `fernhill/staff.html` | the separate localhost staff screen for time off |
++| `fernhill/staff.py`, `fernhill/staff.html` | the separate localhost staff screen for time off and the CSV export |
++| `fernhill/export.py` | appointments in a date range as a CSV for the bookkeeper |
+ | `fernhill/billing.py` | plans, the 14-day trial, plan-change charges. Changed by hand only. |
+ | `fernhill/db.py` | the SQLite schema |
+ 
+@@ -49,3 +50,17 @@ Fernhill does not yet have staff login; do not expose port 8001 publicly. Existi
+ databases gain the new table automatically. Restart running booking processes
+ after installing the change. See [the time-off guide](docs/time-off.md) for setup,
+ recurrence rules, conflict handling, API details, and verification.
++
++## CSV export for bookkeepers
++
++The staff screen has a **Download CSV** form: pick a From and To date (it starts on
++this month) and the browser saves `fernhill-appointments-<from>-to-<to>.csv`, one row
++per appointment with `date, start, end, groomer, client, dog, service, price, status`.
++Cancelled and done appointments are included; filter on `status` in the spreadsheet.
++`price` is the service's current price, since Fernhill doesn't store what was charged.
++
++The file is UTF-8 with a byte-order mark and standard CSV quoting, so names with commas,
++quotes and accents open cleanly in Excel, Numbers and Google Sheets. Names that start
++with `=`, `+`, `-` or `@` get a leading `'` so a spreadsheet shows them as text (the `'`
++stays visible) instead of running them as a formula. The same file is at
++`GET /export.csv?from=2026-10-01&to=2026-10-31` on the staff port.
+diff --git a/fernhill/export.py b/fernhill/export.py
+new file mode 100644
+index 0000000..5852655
+--- /dev/null
++++ b/fernhill/export.py
+@@ -0,0 +1,85 @@
++"""Appointments as a CSV for the salon's bookkeeper, downloaded from the staff screen.
++
++One row per appointment in the date range, every status. Prices are the service's
++current price: Fernhill does not store what was charged.
++"""
++from __future__ import annotations
++
++import csv
++import io
++import re
++import sqlite3
++from datetime import date, timedelta
++
++COLUMNS = ("date", "start", "end", "groomer", "client", "dog", "service", "price", "status")
++
++
++class ExportError(ValueError):
++    """A date range the export can't use; the message is shown to staff."""
++
++
++def parse_range(start: str, end: str) -> tuple[date, date]:
++    days = []
++    for label, value in (("From", start), ("To", end)):
++        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
++            raise ExportError(f"{label} date must look like 2026-10-31.")
++        try:
++            days.append(date.fromisoformat(value))
++        except ValueError:
++            raise ExportError(f"{label} date {value} isn't on the calendar.") from None
++    if days[0] > days[1]:
++        raise ExportError("Pick a From date on or before the To date.")
++    return days[0], days[1]
++
++
++def this_month(today: date) -> tuple[date, date]:
++    """The form's default range: the calendar month, as bookkeepers ask for it."""
++    first = today.replace(day=1)
++    return first, (first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
++
++
++def filename(start: date, end: date) -> str:
++    return f"fernhill-appointments-{start}-to-{end}.csv"
++
++
++def safe_text(value: str) -> str:
++    """Stop Excel and Sheets from running a name as a formula.
++
++    CSV quoting does not prevent that, so names starting with = + - @ or a control
++    character get a leading apostrophe and open as text, apostrophe included.
++    """
++    if value.startswith(("\t", "\r", "\n")) or value.lstrip().startswith(("=", "+", "-", "@")):
++        return "'" + value
++    return value
++
++
++def price(cents: int) -> str:
++    whole, part = divmod(abs(cents), 100)
++    return f"{'-' if cents < 0 else ''}{whole}.{part:02d}"
++
++
++def rows(conn: sqlite3.Connection, start: date, end: date):
++    # start is 'YYYY-MM-DDTHH:MM'; compare the date part so both end days are included.
++    return conn.execute(
++        "SELECT a.start, a.end, g.name AS groomer, c.name AS client, d.name AS dog,"
++        " s.name AS service, s.price_cents, a.status"
++        " FROM appointments a"
++        " JOIN groomers g ON g.id = a.groomer_id"
++        " JOIN dogs d ON d.id = a.dog_id"
++        " JOIN clients c ON c.id = d.client_id"
++        " JOIN services s ON s.id = a.service_id"
++        " WHERE substr(a.start, 1, 10) BETWEEN ? AND ?"
++        " ORDER BY a.start, g.name, a.id", (start.isoformat(), end.isoformat()))
++
++
++def to_csv(conn: sqlite3.Connection, start: date, end: date) -> bytes:
++    """UTF-8 with a BOM so Excel reads accents, CRLF line ends, standard quoting."""
++    out = io.StringIO(newline="")
++    writer = csv.writer(out, lineterminator="\r\n")
++    writer.writerow(COLUMNS)
++    for row in rows(conn, start, end):
++        writer.writerow([
++            row["start"][:10], row["start"][11:16], row["end"][11:16],
++            *(safe_text(row[key]) for key in ("groomer", "client", "dog", "service")),
++            price(row["price_cents"]), row["status"]])
++    return b"\xef\xbb\xbf" + out.getvalue().encode("utf-8")
+diff --git a/fernhill/staff.html b/fernhill/staff.html
+index 78c9420..0109907 100644
+--- a/fernhill/staff.html
++++ b/fernhill/staff.html
+@@ -59,7 +59,7 @@
+     .message { border-radius:7px; padding:10px 13px; margin:0 0 16px; background:#e8f2e6; font-size:13px; }
+     .message.error { background:#fff0e8; color:#813719; }
+     [hidden] { display:none !important; }
+-    .saved { margin-top:24px; }
++    .saved,.export { margin-top:24px; }
+     .saved-list { list-style:none; padding:0; margin:0; }
+     .saved-row { display:flex; gap:16px; align-items:center; padding:18px 24px; border-top:1px solid var(--line); }
+     .saved-row:first-child { border-top:0; }
+@@ -104,18 +104,28 @@
+         <ul id="saved-list" class="saved-list"></ul>
+       </section>
+     </div>
+-    <section class="card" aria-labelledby="form-heading">
+-      <div class="card-head"><div><h2 id="form-heading">Block some time</h2><p id="form-groomer" class="subtle"></p></div></div>
+-      <form id="block-form" class="form-body">
+-        <div id="form-message" class="message" role="status" hidden></div>
+-        <div class="field"><label for="starts-on">Date</label><input id="starts-on" name="starts_on" type="date" required></div>
+-        <div class="two field"><div><label for="start-time">From</label><input id="start-time" name="start_time" type="time" value="12:30" step="60" required></div><div><label for="end-time">To</label><input id="end-time" name="end_time" type="time" value="13:00" step="60" required></div></div>
+-        <div class="field"><label for="repeat">Repeat</label><select id="repeat" name="repeat"><option value="once">Does not repeat</option><option value="weekly">Every week</option></select><p id="repeat-hint" class="hint">Just this date.</p></div>
+-        <div class="field"><label for="note">Label <span class="subtle">(optional)</span></label><input id="note" name="note" maxlength="120" placeholder="Lunch, personal appointment…" autocomplete="off"><p class="hint">Only visible here. Never added to client reminders.</p></div>
+-        <button type="submit" class="button primary" id="save">Save time off</button>
+-      </form>
+-      <div class="protection"><strong>Existing bookings stay put.</strong> If a booking overlaps, we’ll ask you to move or cancel it first. Weekly time off starts on the date you choose.</div>
+-    </section>
++    <div>
++      <section class="card" aria-labelledby="form-heading">
++        <div class="card-head"><div><h2 id="form-heading">Block some time</h2><p id="form-groomer" class="subtle"></p></div></div>
++        <form id="block-form" class="form-body">
++          <div id="form-message" class="message" role="status" hidden></div>
++          <div class="field"><label for="starts-on">Date</label><input id="starts-on" name="starts_on" type="date" required></div>
++          <div class="two field"><div><label for="start-time">From</label><input id="start-time" name="start_time" type="time" value="12:30" step="60" required></div><div><label for="end-time">To</label><input id="end-time" name="end_time" type="time" value="13:00" step="60" required></div></div>
++          <div class="field"><label for="repeat">Repeat</label><select id="repeat" name="repeat"><option value="once">Does not repeat</option><option value="weekly">Every week</option></select><p id="repeat-hint" class="hint">Just this date.</p></div>
++          <div class="field"><label for="note">Label <span class="subtle">(optional)</span></label><input id="note" name="note" maxlength="120" placeholder="Lunch, personal appointment…" autocomplete="off"><p class="hint">Only visible here. Never added to client reminders.</p></div>
++          <button type="submit" class="button primary" id="save">Save time off</button>
++        </form>
++        <div class="protection"><strong>Existing bookings stay put.</strong> If a booking overlaps, we’ll ask you to move or cancel it first. Weekly time off starts on the date you choose.</div>
++      </section>
++      <section class="card export" aria-labelledby="export-heading">
++        <div class="card-head"><div><h2 id="export-heading">For your bookkeeper</h2><p class="subtle">Every appointment between two dates, one row each, for every groomer.</p></div></div>
++        <form id="export-form" class="form-body" method="get" action="/export.csv">
++          <div class="two field"><div><label for="export-from">From</label><input id="export-from" name="from" type="date" value="$export_from" required></div><div><label for="export-to">To</label><input id="export-to" name="to" type="date" value="$export_to" min="$export_from" required></div></div>
++          <button type="submit" class="button primary">Download CSV</button>
++          <p class="hint">Opens in Excel, Numbers, and Google Sheets. Includes cancelled and done appointments. Prices are each service’s current price.</p>
++        </form>
++      </section>
++    </div>
+   </div>
+   <footer>Blocks stay in place until you remove them. Overlapping blocks each apply independently.</footer>
+ </main>
+@@ -238,6 +248,7 @@ el('confirm-remove').addEventListener('click',async () => {
+   finally { setWriting(false); }
+ });
+ viewDate.value=localISO(new Date()); el('starts-on').value=viewDate.value;
++el('export-from').addEventListener('change',() => { el('export-to').min=el('export-from').value; });
+ if (!groomer.options.length) { setWriting(true); el('save').textContent='Save time off'; message('page-message','Add a groomer to the salon before planning time off.',true); }
+ else refresh();
+ </script>
+diff --git a/fernhill/staff.py b/fernhill/staff.py
+index fc48dd8..559715a 100644
+--- a/fernhill/staff.py
++++ b/fernhill/staff.py
+@@ -4,12 +4,13 @@ from __future__ import annotations
+ import json
+ import secrets
+ import sqlite3
++from datetime import date
+ from html import escape
+ from pathlib import Path
+ from string import Template
+ from urllib.parse import parse_qs, urlsplit
+ 
+-from . import scheduling, time_off
++from . import export, scheduling, time_off
+ from .db import salon
+ 
+ 
+@@ -18,9 +19,10 @@ def make_app(conn: sqlite3.Connection):
+     template = Template(Path(__file__).with_name("staff.html").read_text(encoding="utf-8"))
+ 
+     def app(environ, start_response):
+-        def reply(status, body, content_type="application/json"):
+-            data = (body if isinstance(body, str) else json.dumps(body)).encode("utf-8")
+-            start_response(status, [("Content-Type", content_type + "; charset=utf-8"),
++        def reply(status, body, content_type="application/json", extra=()):
++            data = body if isinstance(body, bytes) else (
++                body if isinstance(body, str) else json.dumps(body)).encode("utf-8")
++            start_response(status, [*extra, ("Content-Type", content_type + "; charset=utf-8"),
+                                     ("Content-Length", str(len(data))),
+                                     ("Cache-Control", "no-store"),
+                                     ("X-Content-Type-Options", "nosniff"),
+@@ -51,8 +53,18 @@ def make_app(conn: sqlite3.Connection):
+                 options = "".join(
+                     f'<option value="{row["id"]}">{escape(row["name"])}</option>'
+                     for row in conn.execute("SELECT * FROM groomers ORDER BY name, id"))
++                first, last = export.this_month(date.today())
+                 return reply("200 OK", template.substitute(
+-                    salon=escape(salon(conn)["name"]), groomers=options, token=token), "text/html")
++                    salon=escape(salon(conn)["name"]), groomers=options, token=token,
++                    export_from=first.isoformat(), export_to=last.isoformat()), "text/html")
++            if method == "GET" and path == "/export.csv":
++                try:
++                    start, end = export.parse_range(q.get("from", ""), q.get("to", ""))
++                except export.ExportError as exc:
++                    return reply("400 Bad Request", str(exc), "text/plain")
++                return reply("200 OK", export.to_csv(conn, start, end), "text/csv", [
++                    ("Content-Disposition",
++                     f'attachment; filename="{export.filename(start, end)}"')])
+             if method == "GET" and path == "/api/time-off":
+                 rows = time_off.list_blocks(conn, int(q["groomer"]))
+                 return reply("200 OK", {"blocks": [dict(row) for row in rows]})
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..82a3740
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,149 @@
++import csv
++import io
++import re
++import unittest
++from datetime import date
++
++from fernhill import export, staff
++
++from .fixtures import salon_db
++from .test_staff import call
++
++OCT_1, OCT_31 = date(2026, 10, 1), date(2026, 10, 31)
++
++
++def add(conn, start, end, status="booked", dog=1, groomer=1, service=1):
++    conn.execute("INSERT INTO appointments (dog_id, groomer_id, service_id, start, end, status)"
++                 " VALUES (?, ?, ?, ?, ?, ?)", (dog, groomer, service, start, end, status))
++    conn.commit()
++
++
++def read(data: bytes):
++    return list(csv.reader(io.StringIO(data.decode("utf-8-sig"), newline="")))
++
++
++class ExportTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++
++    def test_one_row_per_appointment_in_range_with_every_status(self):
++        add(self.conn, "2026-09-30T16:00", "2026-09-30T16:45")             # before
++        add(self.conn, "2026-10-01T09:00", "2026-10-01T09:45")
++        add(self.conn, "2026-10-13T11:00", "2026-10-13T13:30", "cancelled", dog=2, groomer=2, service=2)
++        add(self.conn, "2026-10-13T09:30", "2026-10-13T10:30", "done", dog=3)
++        add(self.conn, "2026-10-31T16:00", "2026-10-31T16:45")             # last day counts
++        add(self.conn, "2026-11-01T09:00", "2026-11-01T09:45")             # after
++        rows = read(export.to_csv(self.conn, OCT_1, OCT_31))
++        self.assertEqual(rows[0], list(export.COLUMNS))
++        self.assertEqual(rows[1:], [
++            ["2026-10-01", "09:00", "09:45", "Jess", "Ana Ruiz", "Biscuit", "Bath and brush", "45.00", "booked"],
++            ["2026-10-13", "09:30", "10:30", "Jess", "Lena Park", "Pepper", "Bath and brush", "45.00", "done"],
++            ["2026-10-13", "11:00", "13:30", "Marco", "Ana Ruiz", "Moose", "Full groom", "85.00", "cancelled"],
++            ["2026-10-31", "16:00", "16:45", "Jess", "Ana Ruiz", "Biscuit", "Bath and brush", "45.00", "booked"],
++        ])
++
++    def test_empty_range_is_just_the_header(self):
++        self.assertEqual(export.to_csv(self.conn, OCT_1, OCT_31),
++                         b"\xef\xbb\xbfdate,start,end,groomer,client,dog,service,price,status\r\n")
++
++    def test_commas_quotes_accents_and_line_breaks_survive_a_spreadsheet(self):
++        self.conn.execute("UPDATE clients SET name = 'Ruiz, Ana' WHERE id = 1")
++        self.conn.execute("UPDATE dogs SET name = 'Biscuit \"Bis\"' WHERE id = 1")
++        self.conn.execute("UPDATE groomers SET name = 'Zoë Ñúñez' WHERE id = 1")
++        self.conn.execute("UPDATE services SET name = 'Bath\nand brush' WHERE id = 1")
++        add(self.conn, "2026-10-13T09:00", "2026-10-13T09:45")
++        data = export.to_csv(self.conn, OCT_1, OCT_31)
++        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))  # Excel reads UTF-8 only with the BOM
++        self.assertIn('"Ruiz, Ana","Biscuit ""Bis""","Bath\nand brush"'.encode(), data)
++        self.assertTrue(data.endswith(b"\r\n"))
++        self.assertEqual(read(data)[1][3:7], ["Zoë Ñúñez", "Ruiz, Ana", 'Biscuit "Bis"', "Bath\nand brush"])
++
++    def test_names_that_look_like_formulas_stay_text(self):
++        for value in ("=1+1", "+15035550142", "-Max", "@SUM(A1)", "  =HYPERLINK(1)", "\tTab",
++                      "\rCR", " =1"):
++            with self.subTest(value=value):
++                self.assertEqual(export.safe_text(value), "'" + value)
++        for value in ("", "Zoë", "O'Brien", "Max-a-million", "Dr. @ Groom", " Biscuit", "Two\nlines"):
++            with self.subTest(value=value):
++                self.assertEqual(export.safe_text(value), value)
++        self.conn.execute("UPDATE clients SET name = '=HYPERLINK(\"http://x.invalid\",\"pay\")'")
++        add(self.conn, "2026-10-13T09:00", "2026-10-13T09:45")
++        row = read(export.to_csv(self.conn, OCT_1, OCT_31))[1]
++        self.assertEqual(row[4], "'=HYPERLINK(\"http://x.invalid\",\"pay\")")
++        self.assertEqual(row[0], "2026-10-13")  # dates, times and prices are left alone
++
++    def test_price_is_exact_from_cents(self):
++        for cents, text in ((0, "0.00"), (5, "0.05"), (4500, "45.00"), (12999, "129.99"),
++                            (-105, "-1.05")):
++            self.assertEqual(export.price(cents), text)
++
++    def test_date_range_checks(self):
++        self.assertEqual(export.parse_range("2026-10-13", "2026-10-13"),
++                         (date(2026, 10, 13), date(2026, 10, 13)))
++        for start, end, message in (
++                ("2026-10-31", "2026-10-01", "on or before"),
++                ("", "2026-10-31", "From date must look like"),
++                ("2026-10-01", "10/31/2026", "To date must look like"),
++                ("2026-02-30", "2026-03-01", "isn't on the calendar"),
++                ("2026-10-01T00:00", "2026-10-31", "From date must look like"),
++                ("2026-10-01' OR 1=1--", "2026-10-31", "From date must look like")):
++            with self.subTest(start=start, end=end), self.assertRaisesRegex(export.ExportError, message):
++                export.parse_range(start, end)
++
++    def test_default_range_is_the_calendar_month(self):
++        self.assertEqual(export.this_month(date(2026, 10, 8)), (OCT_1, OCT_31))
++        self.assertEqual(export.this_month(date(2026, 12, 31)), (date(2026, 12, 1), date(2026, 12, 31)))
++        self.assertEqual(export.this_month(date(2028, 2, 1)), (date(2028, 2, 1), date(2028, 2, 29)))
++        self.assertEqual(export.this_month(date(2026, 4, 30)), (date(2026, 4, 1), date(2026, 4, 30)))
++
++
++class ExportRouteTest(unittest.TestCase):
++    def setUp(self):
++        self.conn = salon_db()
++        self.addCleanup(self.conn.close)
++        self.app = staff.make_app(self.conn)
++
++    def test_download_is_an_attachment_csv(self):
++        add(self.conn, "2026-10-13T09:00", "2026-10-13T09:45")
++        result = call(self.app, path="/export.csv", query="from=2026-10-01&to=2026-10-31")
++        self.assertEqual(result["status"], 200)
++        self.assertEqual(result["headers"]["Content-Type"], "text/csv; charset=utf-8")
++        self.assertEqual(result["headers"]["Content-Disposition"],
++                         'attachment; filename="fernhill-appointments-2026-10-01-to-2026-10-31.csv"')
++        self.assertEqual(result["headers"]["Cache-Control"], "no-store")
++        self.assertEqual(result["headers"]["Content-Length"],
++                         str(len(result["body"].encode("utf-8"))))
++        self.assertTrue(result["body"].startswith("﻿date,start,end,"))
++        self.assertIn("2026-10-13,09:00,09:45,Jess,Ana Ruiz,Biscuit,Bath and brush,45.00,booked\r\n",
++                      result["body"])
++
++    def test_bad_ranges_get_a_plain_message(self):
++        for query in ("from=2026-10-31&to=2026-10-01", "from=2026-10-01", "", "from=2026-13-01&to=2026-12-31"):
++            with self.subTest(query=query):
++                result = call(self.app, path="/export.csv", query=query)
++                self.assertEqual(result["status"], 400)
++                self.assertEqual(result["headers"]["Content-Type"], "text/plain; charset=utf-8")
++                self.assertNotIn("Content-Disposition", result["headers"])
++
++    def test_export_keeps_the_staff_screen_protections(self):
++        add(self.conn, "2026-10-13T09:00", "2026-10-13T09:45")
++        result = call(self.app, path="/export.csv", query="from=2026-10-01&to=2026-10-31",
++                      host="evil.example:8001")
++        self.assertEqual(result["status"], 403)
++        self.assertNotIn("Ana Ruiz", result["body"])
++        result = call(self.app, "POST", "/export.csv", query="from=2026-10-01&to=2026-10-31")
++        self.assertEqual(result["status"], 403)
++
++    def test_staff_screen_has_the_download_form_for_this_month(self):
++        html = call(self.app)["body"]
++        first, last = export.this_month(date.today())
++        form = re.search(r'<form id="export-form"[^>]*>.*?</form>', html, re.S)[0]
++        self.assertIn('method="get" action="/export.csv"', form)
++        self.assertIn(f'name="from" type="date" value="{first}"', form)
++        self.assertIn(f'name="to" type="date" value="{last}"', form)
++        self.assertIn("Download CSV", form)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.39.5 (Apple Git-154)
+

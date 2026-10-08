@@ -1,0 +1,33 @@
+trials / finished / paid: 55 49 14 29%
+non-payers with <=8 clients: 27 of 35
+clients entered, gap: 8 .. 73
+list in vs not: 8/16 vs 6/33, p=0.040
+online>=10 same set as list in: True
+max online bookings without list: 9
+27+ bookings same set as list in: True | max bookings without list: 21
+no-list salons with any online bookings: 29 of 33
+finished with any online bookings: 45 of 49
+2+ groomers vs 1: 10/27 vs 4/22, p=0.207
+reminders on vs off: 9/26 vs 5/23, p=0.360
+1 groomer: list in 3/8, not in 1/14
+2+ groomers: list in 5/8, not in 5/19
+paid without list: [("Rosie's Leash", '2'), ('Otis & Hound', '2'), ('Happy Hound', '2'), ('Willow Pup Spa', '3'), ('Wag Grooming', '4'), ('Willow Tails', '1')]
+signup 2026-06: 4/14
+signup 2026-07: 1/13
+signup 2026-08: 5/14
+signup 2026-09: 4/8
+exit survey answered: 24 of 35
+  setup: 8; one-groomer 6; list in: [('Lather Leash', 153)]
+  lunch: 6; one-groomer 2; list in: [('Bramble Grooming', 154)]
+  offline: 5; one-groomer 1; list in: [("Rosie's Dog Salon", 136), ('Wag Mutt Cuts', 73)]
+  price: 4; one-groomer 4; list in: [('Thistle Hound', 191)]
+  big dogs: 1; one-groomer 0; list in: []
+silent with list in: [('Pampered Pup Spa', 349), ('Fluff Paws', 210), ('Puddle Hound', 361)]
+latest trial_end among lunch answers: 2026-07-31
+  like Maple Grooming: 3/8 paid
+  like Juniper Grooming: 1/14 paid
+  like Thistle Pup Spa: 5/19 paid
+  like Sudsy Hound: 5/8 paid
+  like Cedar Tails: 5/8 paid
+  like Tidy Coat Co.: 5/19 paid
+in trial: [('Maple Grooming', '2026-10-03', 243, '17/47'), ('Juniper Grooming', '2026-10-03', 5, '4/8'), ('Thistle Pup Spa', '2026-10-08', 2, '8/17'), ('Sudsy Hound', '2026-10-12', 210, '30/37'), ('Cedar Tails', '2026-10-11', 94, '38/67'), ('Tidy Coat Co.', '2026-10-13', 0, '6/17')]
