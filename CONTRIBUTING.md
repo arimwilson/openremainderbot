@@ -22,7 +22,8 @@ something out on your setup, though, that is a docs bug, and an issue is welcome
   runs, describe what went wrong. Don't link the runs: your instance is private.
 - **Nothing from an instance goes upstream.** `GOALS.md`, `sources.toml`, `INBOX.md`,
   `state.json`, and `runs/` exist only in instance repos. Upstream keeps the examples
-  (`GOALS.example.md`, `sources.example.toml`) instead.
+  (`GOALS.example.md`, `sources.example.toml`) instead, and `examples/`, whose runs come
+  from a demo instance where everything is made up.
 
 ## Adding a source adapter
 

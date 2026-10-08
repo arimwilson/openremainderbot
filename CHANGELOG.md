@@ -23,6 +23,8 @@ The first public release.
 - **Sources.** `sources.toml` (`version = 1`) with seven adapters: `gws-tasks`,
   `gws-doc`, `gh-issues`, `gh-roadmaps`, `gh-markdown`, `file`, and `command`.
   `private` sources are named in the prompt's privacy rule.
+- **Examples.** `examples/` has four real runs from a demo instance with made-up goals,
+  including a rejected run and the run that redid it from the rejection note.
 - **Safety.** `doctor` checks that an instance is ready to run. A public-repo guard
   refuses to push to a public `origin` unless `ALLOW_PUBLIC_REPO=1`. A tick restarts
   itself when its pull changed the code.

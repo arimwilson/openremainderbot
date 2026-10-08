@@ -1,0 +1,9 @@
+﻿date,start,end,groomer,client,dog,service,price,status
+2026-09-02,09:00,09:45,Jess Miller,Ana Ruiz,Biscuit,Bath and brush,45.00,done
+2026-09-05,10:00,11:30,Marco Díaz,Lena Park,Pepper,Full groom,85.50,done
+2026-09-08,11:00,11:45,Jess Miller,José García,Moose,Bath and brush,45.00,done
+2026-09-11,12:00,13:30,Marco Díaz,Emma Chen,Clover,Full groom,85.50,done
+2026-09-14,13:00,13:45,Jess Miller,"Robin, ""RJ"" Jones",Winnie,Bath and brush,45.00,cancelled
+2026-09-17,09:00,10:30,Marco Díaz,Camille Laurent,Otis,Full groom,85.50,done
+2026-09-20,10:00,10:45,Jess Miller,Maya Patel,Maple,Bath and brush,45.00,booked
+2026-09-23,11:00,12:30,Marco Díaz,Zoë Wilson,Finley,Full groom,85.50,booked

@@ -4,6 +4,13 @@ Your Claude or Codex subscription resets every week, and whatever quota you didn
 gone. remainderbot notices when a reset is a few hours away with quota left, and spends
 it on one finished, reviewable piece of work: a pull request in your own private repo.
 
+[![A run's pull request: "Groomer time off and breaks", with the task, why it was chosen,
+and what exists now](examples/groomer-time-off/pr.png)](examples/)
+
+*A run's PR on a demo instance, for a made-up founder's booking app. Four real runs,
+including a rejected one and the run that redid it from the rejection note, are in
+[examples/](examples/).*
+
 ## How it works
 
 - **Trigger.** An hourly cron job reads each CLI's own quota numbers. When the weekly
