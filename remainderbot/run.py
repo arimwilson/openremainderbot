@@ -364,9 +364,12 @@ def execute(decision: Decision, config: Config, log=print,
         })
         (run_dir / "run.json").write_text(json.dumps(info, indent=2) + "\n")
 
-        # 6. commit whatever is in the run directory (large logs stay out of git)
-        _ignore_big_logs(log_dir, config.log_max_bytes)
+        # 6. commit whatever is in the run directory (large logs stay out of git). The other logs
+        # are added with -f: an agent's own .gitignore can list log/ as a whole.
+        keep = _ignore_big_logs(log_dir, config.log_max_bytes)
         git(config, "add", "-A", str(run_dir))
+        if keep:
+            git(config, "add", "-f", "--", *(str(p) for p in keep))
         if git(config, "status", "--porcelain", str(run_dir)).strip():
             git(config, "commit", "-q", "-m", f"run {run_id}: {'done' if done else 'finalized'}")
         return RunResult(run_id, branch, run_dir, done, finalized, exit_code, timed_out,
@@ -383,9 +386,14 @@ def execute(decision: Decision, config: Config, log=print,
 def _clean_ignored(config: Config, run_dir: Path, log=print) -> None:
     """Delete the run's gitignored files (node_modules, caches, clones): the branch has everything
     that matters, and left in place they pile up to gigabytes across runs. log/ is kept, since a
-    transcript over the size cap is ignored and exists nowhere else."""
+    transcript over the size cap is ignored and exists nowhere else.
+
+    Git does not look inside a directory that is ignored as a whole (an agent's `log/` line), so
+    the exclude pathspec alone never reaches it and the directory goes. `-e` un-ignores log/ so
+    git walks into it; the pathspec then keeps the transcripts that log/.gitignore lists."""
     rel = _rel(config, run_dir)
-    out = git(config, "clean", "-ffdX", "--", rel, f":(exclude){rel}/log", check=False).strip()
+    out = git(config, "clean", "-ffdX", "-e", f"!/{rel}/log/", "--", rel, f":(exclude){rel}/log",
+              check=False).strip()
     if out:
         log(f"cleaned ignored files from {rel}:\n{out}")
 
@@ -406,10 +414,12 @@ def _usage_json(usages: dict) -> dict:
             for p, u in usages.items()}
 
 
-def _ignore_big_logs(log_dir: Path, limit: int) -> None:
-    big = [p.name for p in log_dir.iterdir() if p.is_file() and p.stat().st_size > limit]
+def _ignore_big_logs(log_dir: Path, limit: int) -> list[Path]:
+    """List the logs over the size cap in log/.gitignore; return the files to commit."""
+    big = {p.name for p in log_dir.iterdir() if p.is_file() and p.stat().st_size > limit}
     if big:
-        (log_dir / ".gitignore").write_text("".join(f"{n}\n" for n in big))
+        (log_dir / ".gitignore").write_text("".join(f"{n}\n" for n in sorted(big)))
+    return sorted(p for p in log_dir.iterdir() if p.is_file() and p.name not in big)
 
 
 def _placeholder_readme(run_id: str, provider: str, decision: Decision, before: str, after: str,
