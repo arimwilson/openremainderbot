@@ -1,4 +1,4 @@
-# remainderbot
+# <img src="docs/logo-blink.png" alt="remainderbot logo: a percent sign whose top circle is a smiling face" width="72" align="center"> remainderbot
 
 Your Claude or Codex subscription resets every week, and whatever quota you didn't use is
 gone. remainderbot notices when a reset is a few hours away with quota left, and spends
