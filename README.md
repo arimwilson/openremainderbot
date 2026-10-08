@@ -392,7 +392,9 @@ the server.
 PRs there. Messages, posts, and deploys come as drafts, with the exact text or command
 for you to use.
 
-**Can I run only one provider?** Yes: `PROVIDERS=claude` or `PROVIDERS=codex`.
+**Do I need both subscriptions?** No. By default each tick checks both and runs whichever
+is near its reset. If you have only one, set `PROVIDERS=claude` (or `codex`) so `doctor`
+doesn't fail on the other and the log doesn't call it unreadable every hour.
 
 **Is unattended use allowed under my plan?** Read your provider's terms: Anthropic's
 [Consumer Terms](https://www.anthropic.com/legal/consumer-terms) and OpenAI's
