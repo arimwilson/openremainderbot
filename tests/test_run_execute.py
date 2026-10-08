@@ -111,14 +111,31 @@ class Execute(unittest.TestCase):
         self.assertIn('"prompt_head": "# remainderbot worker run', log)
         self.assertEqual(self.git("log", "--oneline", r.branch).count("\n"), 5)  # init, start, plan, agent done, wrapper done
 
-    def test_ignored_files_are_cleaned_but_logs_kept(self):
-        with mock.patch.dict(os.environ, {"FAKE_MODE": "done", "FAKE_JUNK": "1"}):
-            r = run.execute(self.decision(), self.config, self.logs.append)
-        self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
-        self.assertIn(f"runs/{r.id}/.gitignore", self.git("ls-tree", "-r", "--name-only", r.branch).split())
-        left = sorted(str(p.relative_to(r.run_dir)) for p in r.run_dir.rglob("*") if p.is_file())
-        self.assertEqual(left, ["log/kept.jsonl"])
-        self.assertTrue(any("cleaned ignored files" in l for l in self.logs), self.logs)
+    def left_on_disk(self, r):
+        return sorted(str(p.relative_to(r.run_dir)) for p in r.run_dir.rglob("*") if p.is_file())
+
+    def test_ignored_files_are_cleaned_and_logs_committed(self):
+        for i, junk in enumerate(("1", "logdir")):  # the agent ignores one log file, or log/ whole
+            with self.subTest(junk=junk), mock.patch.dict(os.environ, {"FAKE_MODE": "done", "FAKE_JUNK": junk}):
+                self.logs = []
+                r = run.execute(self.decision(), self.config, self.logs.append, run_id=f"20260912-120{i}-codex")
+                self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+                files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
+                for f in (".gitignore", "log/codex.jsonl", "log/kept.jsonl"):
+                    self.assertIn(f"runs/{r.id}/{f}", files, f)
+                self.assertEqual(self.left_on_disk(r), [])  # junk cleaned; the logs are on the branch
+                self.assertTrue(any("cleaned ignored files" in l for l in self.logs), self.logs)
+
+    def test_logs_over_the_cap_stay_on_disk(self):
+        # the agent ignores log/ whole; codex.jsonl is over the cap, the empty kept.jsonl is not
+        config = Config(repo_dir=self.repo, providers=["codex"], finalize_minutes=1, log_max_bytes=0)
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "done", "FAKE_JUNK": "logdir"}):
+            r = run.execute(self.decision(), config, self.logs.append)
+        files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
+        self.assertNotIn(f"runs/{r.id}/log/codex.jsonl", files)
+        self.assertIn(f"runs/{r.id}/log/kept.jsonl", files)
+        self.assertEqual(self.git("show", f"{r.branch}:runs/{r.id}/log/.gitignore"), "codex.jsonl\n")
+        self.assertEqual(self.left_on_disk(r), ["log/codex.jsonl"])
 
     def test_no_done_runs_finalize(self):
         with mock.patch.dict(os.environ, {"FAKE_MODE": "nodone"}):

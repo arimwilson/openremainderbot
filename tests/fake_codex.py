@@ -21,8 +21,8 @@ mode = os.environ.get("FAKE_MODE", "done")
 print(json.dumps({"type": "start", "args": args, "prompt_head": prompt[:40]}), flush=True)
 
 
-def commit(msg):
-    subprocess.run(["git", "-C", repo, "add", "-A", run_dir], check=True)
+def commit(msg, path=run_dir):
+    subprocess.run(["git", "-C", repo, "add", "-A", path], check=True)
     subprocess.run(["git", "-C", repo, "commit", "-qm", msg], check=True)
 
 
@@ -35,7 +35,7 @@ if prompt.startswith("# remainderbot finalize pass"):
 
 with open(os.path.join(run_dir, "PLAN.md"), "w") as f:
     f.write("# plan\n")
-commit(f"run {run_id}: plan")
+commit(f"run {run_id}: plan", os.path.join(run_dir, "PLAN.md"))  # as worker.md says: PLAN.md alone
 if mode == "hang":
     time.sleep(3600)
 if mode == "ratelimit":
@@ -44,9 +44,11 @@ if mode == "ratelimit":
 os.makedirs(os.path.join(run_dir, "artifact"), exist_ok=True)
 with open(os.path.join(run_dir, "artifact", "thing.md"), "w") as f:
     f.write("the deliverable\n")
-if os.environ.get("FAKE_JUNK"):  # ignored files the wrapper should clean up (all but log/)
+junk = os.environ.get("FAKE_JUNK")
+if junk:  # ignored files the wrapper should clean up (all but log/); "logdir" ignores log/ whole
     with open(os.path.join(run_dir, ".gitignore"), "w") as f:
-        f.write("artifact/node_modules/\nartifact/clone/\n.cache/\nlog/kept.jsonl\n")
+        f.write("artifact/node_modules/\nartifact/clone/\n.cache/\n"
+                + ("log/\n" if junk == "logdir" else "log/kept.jsonl\n"))
     for d in ("artifact/node_modules/pkg", ".cache/ab", "artifact/clone"):
         os.makedirs(os.path.join(run_dir, d), exist_ok=True)
     for p in ("artifact/node_modules/pkg/index.js", ".cache/ab/abc.json", "artifact/clone/x", "log/kept.jsonl"):
