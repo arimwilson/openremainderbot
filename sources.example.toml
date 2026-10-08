@@ -1,0 +1,55 @@
+# What the snapshot reads at the start of each tick: one goals/snapshot/<name>.md for
+# each [[sources]] table. Every field and type is in docs/sources.md. The file is
+# checked in full before anything is fetched; `python3 -m remainderbot doctor` checks it too.
+version = 1
+
+# Open issues across your repos. Put your GitHub user or organization here.
+[[sources]]
+name = "issues"
+type = "gh-issues"
+owner = "your-github-user"
+
+# The rest are examples: uncomment the ones you use and fill them in.
+
+# README heads plus TODO/ROADMAP/PLAN files, repos in priority order.
+# [[sources]]
+# name = "repos"
+# type = "gh-roadmaps"
+# repos = ["your-github-user/app", "your-github-user/site"]
+
+# Local Markdown files: a TODO.md, an Obsidian vault. Paths are relative to this repo or under ~/.
+# [[sources]]
+# name = "todo"
+# type = "file"
+# paths = ["~/notes/TODO.md", "~/notes/projects/**/*.md"]
+
+# Google Tasks and a Google Doc, through the gws CLI.
+# [[sources]]
+# name = "tasks"
+# type = "gws-tasks"
+# description = "Open Google Tasks; mostly errands, a few deliverables"
+#
+# [[sources]]
+# name = "plan"
+# type = "gws-doc"
+# doc_id = "the long id in the doc's URL"
+
+# A repo of Markdown notes. `private`: nothing drawn from it goes into anything meant for
+# publication.
+# [[sources]]
+# name = "notes"
+# type = "gh-markdown"
+# repo = "your-github-user/notes"
+# private = true
+#
+#   [[sources.parts]]          # belongs to the [[sources]] table above it
+#   include = "projects/*.md"
+#   sections = ["Open questions", "Next"]
+
+# Anything with a command line: its stdout is the file. A nonzero exit or a timeout
+# keeps the last content, marked stale.
+# [[sources]]
+# name = "tracker"
+# type = "command"
+# run = "your-tracker-export --assignee me --format markdown"
+# recheck = "run the export again and look for the item's id"

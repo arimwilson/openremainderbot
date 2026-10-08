@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.tick.lock
+.pytest_cache/
+goals/snapshot/
