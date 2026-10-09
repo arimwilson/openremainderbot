@@ -4,10 +4,14 @@ Your Claude or Codex subscription resets every week, and whatever quota you didn
 gone. RemainderBot notices when a reset is a few hours away with quota left, and spends
 it on finished, easily reviewable pieces of work: pull requests in your own private repo.
 
-[![A run's pull request: "Groomer time off and breaks", with the task, why it was chosen,
-and what exists now](examples/groomer-time-off/pr.png)](examples/)
+<picture>
+  <source srcset="https://www.ariwilson.com/images/posts/openremainderbot/loop-anim-dark.webp" media="(prefers-color-scheme: dark)">
+  <img src="https://www.ariwilson.com/images/posts/openremainderbot/loop-anim.webp" width="640" alt="A cartoon robot walks through one RemainderBot run for Fernhill, a made-up dog-grooming scheduler: it checks the weekly quota is under 4 hours from reset with 41% left, reads a GOALS.md aiming for 50 paying salons, picks an open customer issue, builds a groomer time-off feature and passes 62 tests, opens a pull request, and a person merges it.">
+</picture>
 
-_A run's PR on a demo instance, for a made-up founder's booking app. Four real runs,
+_One run, illustrated, for a made-up founder's dog-grooming scheduler. The real run it's
+drawn from is in [examples/groomer-time-off](examples/groomer-time-off/), with its
+[pull request](examples/groomer-time-off/pr.png), plan, and patch. Three more runs,
 including a rejected one and the run that redid it from the rejection note, are in
 [examples/](examples/)._
 
