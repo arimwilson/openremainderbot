@@ -9,7 +9,9 @@ and what exists now](examples/groomer-time-off/pr.png)](examples/)
 
 _A run's PR on a demo instance, for a made-up founder's booking app. Four real runs,
 including a rejected one and the run that redid it from the rejection note, are in
-[examples/](examples/)._
+[examples/](examples/). The
+[launch post](https://www.ariwilson.com/writing/openremainderbot#now-you-can-run-it-too)
+animates this run from start to finish._
 
 ## How it works
 
