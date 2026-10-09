@@ -1,7 +1,8 @@
 # GOALS
 
-The only file you write for the bot. Every run reads it first. Replace this example (a
-made-up solo founder) with your own; `doctor` fails until you do.
+Your sources say what could be done; this file says what should be. Every run reads it
+first. Replace this example (a made-up solo founder) with your own; `doctor` fails until
+you do.
 
 > **What a run reads, in order**
 >

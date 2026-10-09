@@ -16,9 +16,12 @@ including a rejected one and the run that redid it from the rejection note, are 
 - **Trigger.** An hourly cron job reads each CLI's own quota numbers. When the weekly
   reset is less than 4 hours away and at least 10% is left, it runs.
   ([DESIGN.md §2](DESIGN.md#2-trigger-is-it-the-right-time-and-budget))
-- **Select.** The agent reads your `GOALS.md`, a fresh snapshot of your sources (tasks,
-  docs, issues, notes), and the verdicts on past runs. It picks one task, checks that the
-  task isn't already done, and commits a plan before building anything.
+- **Select.** The agent reads three things. A fresh snapshot of your sources (the task
+  lists, issues, docs, and notes you already keep) supplies the candidate tasks. Your
+  `GOALS.md` says which of those matter and in what order, since your sources mix
+  errands with real work and don't rank anything. The verdicts on past runs keep it from
+  repeating itself. It picks one task, checks that the task isn't already done, and
+  commits a plan before building anything.
   ([§3](DESIGN.md#3-task-selection-what-should-it-work-on))
 - **Build.** It works against a hard deadline set from the reset time, sized to the quota
   left: a document, a feature with tests, or a prototype.
@@ -74,8 +77,10 @@ The bot creates `INBOX.md` and `state.json` itself.
 
 ## Tell it what matters
 
-`GOALS.md` is the only file you write for the bot, and every run reads it first.
-`GOALS.example.md` is a complete example for a made-up founder. It has four sections:
+Your sources say what *could* be done; `GOALS.md` says what *should* be. Of everything a
+run reads, it's the only thing you write for the bot (`sources.toml` just points at
+things you already keep), and every run reads it first. `GOALS.example.md` is a complete
+example for a made-up founder. It has four sections:
 
 - **Priorities**: what the work is for, in tiers. A modest artifact in a high tier beats
   an impressive one in a low tier.
