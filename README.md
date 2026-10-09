@@ -1,4 +1,4 @@
-# <img src="docs/logo-blink.png" alt="remainderbot logo: a percent sign whose top circle is a smiling face" width="72" align="center"> remainderbot
+# <img src="docs/logo-blink.png" alt="RemainderBot logo: a percent sign whose top circle is a smiling face" width="72" align="center"> RemainderBot
 
 Your Claude or Codex subscription resets every week, and whatever quota you didn't use is
 gone. remainderbot notices when a reset is a few hours away with quota left, and spends
@@ -7,9 +7,9 @@ it on finished, easily reviewable pieces of work: pull requests in your own priv
 [![A run's pull request: "Groomer time off and breaks", with the task, why it was chosen,
 and what exists now](examples/groomer-time-off/pr.png)](examples/)
 
-*A run's PR on a demo instance, for a made-up founder's booking app. Four real runs,
+_A run's PR on a demo instance, for a made-up founder's booking app. Four real runs,
 including a rejected one and the run that redid it from the rejection note, are in
-[examples/](examples/).*
+[examples/](examples/)._
 
 ## How it works
 
@@ -77,7 +77,7 @@ The bot creates `INBOX.md` and `state.json` itself.
 
 ## Tell it what matters
 
-Your sources say what *could* be done; `GOALS.md` says what *should* be. Of everything a
+Your sources say what _could_ be done; `GOALS.md` says what _should_ be. Of everything a
 run reads, it's the only thing you write for the bot (`sources.toml` just points at
 things you already keep), and every run reads it first. `GOALS.example.md` is a complete
 example for a made-up founder. It has four sections:
@@ -92,6 +92,7 @@ example for a made-up founder. It has four sections:
 
   ```markdown
   ## Rules
+
   - Prefer, in tier order: (a) issues labeled `customer`; (b) newsletter drafts from
     my outline notes; (c) anything in the repos' TODO files.
   - Never change billing code; I write every change there myself.
@@ -130,15 +131,15 @@ private = true            # nothing drawn from it goes into anything meant for p
   sections = ["Open questions", "Next"]
 ```
 
-| Type | Reads |
-|---|---|
-| `gws-tasks` | open Google Tasks |
-| `gws-doc` | a Google Doc, as Markdown |
-| `gh-issues` | open GitHub issues across an owner or a list of repos |
-| `gh-roadmaps` | each repo's README head plus its TODO/ROADMAP/PLAN files |
-| `gh-markdown` | chosen sections, frontmatter, or whole files from a repo of Markdown |
-| `file` | local files, by glob |
-| `command` | the stdout of any command: an export from Linear, Notion, or your own script |
+| Type          | Reads                                                                        |
+| ------------- | ---------------------------------------------------------------------------- |
+| `gws-tasks`   | open Google Tasks                                                            |
+| `gws-doc`     | a Google Doc, as Markdown                                                    |
+| `gh-issues`   | open GitHub issues across an owner or a list of repos                        |
+| `gh-roadmaps` | each repo's README head plus its TODO/ROADMAP/PLAN files                     |
+| `gh-markdown` | chosen sections, frontmatter, or whole files from a repo of Markdown         |
+| `file`        | local files, by glob                                                         |
+| `command`     | the stdout of any command: an export from Linear, Notion, or your own script |
 
 Every field, each adapter's output, and the access each one needs are in
 [docs/sources.md](docs/sources.md). A source whose fetch fails keeps its last content
@@ -216,7 +217,7 @@ clean ticks, take `RUN_DISABLED=1` off the crontab line.
 ## Review runs
 
 - **The PR is the notification.** The bot opens PRs with your `gh` login, and GitHub
-  doesn't email you about your own actions by default. Turn on *Include your own updates*
+  doesn't email you about your own actions by default. Turn on _Include your own updates_
   in GitHub's email notification settings, or give the bot its own account.
 - **Each run's README** (the PR body) says what exists now, how it was verified, and your
   one next step: merge, `git am` a patch, paste a draft, or run one command. The work
@@ -230,13 +231,13 @@ clean ticks, take `RUN_DISABLED=1` off the crontab line.
 
 ## Privacy
 
-| Data | Where it goes | Who can read it |
-|---|---|---|
-| Your sources | read by `gws`, `gh`, local files, or your command | unchanged |
-| `goals/snapshot/` | the server's disk; gitignored on `main` | the server |
-| `runs/<id>/snapshot/`, `PLAN.md`, `log/` | committed on the run branch | anyone with read access to your instance repo |
-| The PR and `INBOX.md` | your instance repo | same |
-| The agent's session | Anthropic or OpenAI, as with any Claude Code or Codex use | the provider |
+| Data                                     | Where it goes                                             | Who can read it                               |
+| ---------------------------------------- | --------------------------------------------------------- | --------------------------------------------- |
+| Your sources                             | read by `gws`, `gh`, local files, or your command         | unchanged                                     |
+| `goals/snapshot/`                        | the server's disk; gitignored on `main`                   | the server                                    |
+| `runs/<id>/snapshot/`, `PLAN.md`, `log/` | committed on the run branch                               | anyone with read access to your instance repo |
+| The PR and `INBOX.md`                    | your instance repo                                        | same                                          |
+| The agent's session                      | Anthropic or OpenAI, as with any Claude Code or Codex use | the provider                                  |
 
 - **The public-repo guard.** Before the first push in a process, `gh repo view` must say
   that every URL `origin` pushes to is private (or internal). If it can't tell, the push
@@ -259,20 +260,20 @@ the worst thing a confused agent could do is small:
 
 - [ ] A dedicated machine, and a dedicated non-root user on it.
 - [ ] A fine-grained GitHub token for `gh auth login` with only the instance repo
-  selected, and Contents and Pull requests set to read and write. Fine-grained tokens can
-  always read every public repo, so public sources need nothing more.
+      selected, and Contents and Pull requests set to read and write. Fine-grained tokens can
+      always read every public repo, so public sources need nothing more.
 - [ ] Know what a private source repo costs. Every `gh-*` source reads with that same
-  login, and a fine-grained token gives the same permissions to every repo it selects,
-  all owned by one user or organization. A private source repo therefore has to be
-  selected in that token (with Issues read added for `gh-issues`), which lets the agent
-  write to it too. A private repo with a different owner than the instance repo can't be
-  read at all. (A classic token spans owners, but its `repo` scope writes to every
-  private repo you can reach.) If that is too much, keep such repos out of
-  `sources.toml`.
+      login, and a fine-grained token gives the same permissions to every repo it selects,
+      all owned by one user or organization. A private source repo therefore has to be
+      selected in that token (with Issues read added for `gh-issues`), which lets the agent
+      write to it too. A private repo with a different owner than the instance repo can't be
+      read at all. (A classic token spans owners, but its `repo` scope writes to every
+      private repo you can reach.) If that is too much, keep such repos out of
+      `sources.toml`.
 - [ ] Read-only Google scopes (`gws auth login --readonly`), and only the services your
-  sources use.
+      sources use.
 - [ ] No other credentials on the box: no SSH keys to other machines, no cloud CLIs, no
-  password manager.
+      password manager.
 
 What remainderbot itself reads, and where it sends it:
 
@@ -321,25 +322,25 @@ finds another still running logs `skip: previous tick still running`.
 
 Environment variables, set on the crontab line or as `NAME=value` lines above it:
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `WINDOW_HOURS` | 4 | run only when the weekly reset is this close |
-| `MIN_REMAINING` | 10 | percent of the weekly (and the 5-hour) quota that must be left |
-| `MAX_RUN_MINUTES` | 45 | cap on a run; deadline = min(reset, now + cap) − 15 min |
-| `MIN_RERUN_MINUTES` | 20 | after a run that finished, run again in the same period only if this much time is left |
-| `PROVIDERS` | `claude,codex` | which providers to read and run |
-| `REPO_DIR` | the checkout containing the package | where `GOALS.md`, `state.json`, and `runs/` live |
-| `SOURCES_FILE` | `sources.toml` | what the snapshot reads; relative to `REPO_DIR` |
-| `RUN_DISABLED` | unset | log the decision and stop without claiming the period |
-| `ALLOW_PUBLIC_REPO` | unset | push and open PRs even when `origin` is public |
-| `AGENT_FULL_ACCESS` | 1 | pass the bypass-permissions flags to the CLI; with 0, Codex's sandbox makes `.git` read-only and the run's commits fail |
-| `CLAUDE_MODEL` / `CODEX_MODEL` | `claude-opus-5-5` / `gpt-6-astra` | models ([DESIGN.md §4.4](DESIGN.md#44-models-effort-and-cli-settings)) |
-| `CLAUDE_FALLBACK_MODEL` | `claude-sonnet-5-5` | `--fallback-model` for Claude; empty to omit the flag |
-| `CLAUDE_OAUTH_TOKEN` | unset | overrides `~/.claude/.credentials.json` and the macOS keychain |
-| `CLAUDE_REFRESH_MODEL` | `haiku` | model for the one-shot `claude -p` that refreshes a stored token after a 401 |
-| `DEADLINE_BUFFER_MINUTES` | 15 | how long before the reset a run must end |
-| `FINALIZE_MINUTES` | 10 | time limit for the finalize pass |
-| `LOG_MAX_BYTES` | 5 MB | a run's agent log larger than this is not committed |
+| Variable                       | Default                             | Meaning                                                                                                                 |
+| ------------------------------ | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `WINDOW_HOURS`                 | 4                                   | run only when the weekly reset is this close                                                                            |
+| `MIN_REMAINING`                | 10                                  | percent of the weekly (and the 5-hour) quota that must be left                                                          |
+| `MAX_RUN_MINUTES`              | 45                                  | cap on a run; deadline = min(reset, now + cap) − 15 min                                                                 |
+| `MIN_RERUN_MINUTES`            | 20                                  | after a run that finished, run again in the same period only if this much time is left                                  |
+| `PROVIDERS`                    | `claude,codex`                      | which providers to read and run                                                                                         |
+| `REPO_DIR`                     | the checkout containing the package | where `GOALS.md`, `state.json`, and `runs/` live                                                                        |
+| `SOURCES_FILE`                 | `sources.toml`                      | what the snapshot reads; relative to `REPO_DIR`                                                                         |
+| `RUN_DISABLED`                 | unset                               | log the decision and stop without claiming the period                                                                   |
+| `ALLOW_PUBLIC_REPO`            | unset                               | push and open PRs even when `origin` is public                                                                          |
+| `AGENT_FULL_ACCESS`            | 1                                   | pass the bypass-permissions flags to the CLI; with 0, Codex's sandbox makes `.git` read-only and the run's commits fail |
+| `CLAUDE_MODEL` / `CODEX_MODEL` | `claude-opus-5-5` / `gpt-6-astra`   | models ([DESIGN.md §4.4](DESIGN.md#44-models-effort-and-cli-settings))                                                  |
+| `CLAUDE_FALLBACK_MODEL`        | `claude-sonnet-5-5`                 | `--fallback-model` for Claude; empty to omit the flag                                                                   |
+| `CLAUDE_OAUTH_TOKEN`           | unset                               | overrides `~/.claude/.credentials.json` and the macOS keychain                                                          |
+| `CLAUDE_REFRESH_MODEL`         | `haiku`                             | model for the one-shot `claude -p` that refreshes a stored token after a 401                                            |
+| `DEADLINE_BUFFER_MINUTES`      | 15                                  | how long before the reset a run must end                                                                                |
+| `FINALIZE_MINUTES`             | 10                                  | time limit for the finalize pass                                                                                        |
+| `LOG_MAX_BYTES`                | 5 MB                                | a run's agent log larger than this is not committed                                                                     |
 
 ## Troubleshooting
 
@@ -368,6 +369,7 @@ Environment variables, set on the crontab line or as `NAME=value` lines above it
 
   The log's `init` line names the requested model even after a fallback, so don't rely
   on it.
+
 - **A run is listed under `"unpublished"` in `state.json`.** Its push or `gh pr create`
   failed (the log says why), and every tick retries it. Run `doctor`.
 - **`pull main failed: CONFLICT`.** Something else pushed to `main` while the server had
