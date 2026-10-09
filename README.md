@@ -1,7 +1,7 @@
 # <img src="docs/logo-blink.png" alt="RemainderBot logo: a percent sign whose top circle is a smiling face" width="72" align="center"> RemainderBot
 
 Your Claude or Codex subscription resets every week, and whatever quota you didn't use is
-gone. remainderbot notices when a reset is a few hours away with quota left, and spends
+gone. RemainderBot notices when a reset is a few hours away with quota left, and spends
 it on finished, easily reviewable pieces of work: pull requests in your own private repo.
 
 [![A run's pull request: "Groomer time off and breaks", with the task, why it was chosen,
@@ -41,7 +41,7 @@ including a rejected one and the run that redid it from the rejection note, are 
 - [`gws`](https://www.npmjs.com/package/@googleworkspace/cli), only if you use Google
   Tasks or Docs as sources.
 
-remainderbot is a small Python package with no dependencies outside the standard library.
+RemainderBot is a small Python package with no dependencies outside the standard library.
 
 ## Set up your private instance
 
@@ -275,12 +275,12 @@ the worst thing a confused agent could do is small:
 - [ ] No other credentials on the box: no SSH keys to other machines, no cloud CLIs, no
       password manager.
 
-What remainderbot itself reads, and where it sends it:
+What RemainderBot itself reads, and where it sends it:
 
 - **Claude quota.** It reads Claude Code's OAuth token from `~/.claude/.credentials.json`
   (or the macOS keychain, or `CLAUDE_OAUTH_TOKEN`). It sends the token only to
   `api.anthropic.com`, to read your quota.
-- **Codex quota** comes from `codex app-server`. remainderbot never reads Codex's
+- **Codex quota** comes from `codex app-server`. RemainderBot never reads Codex's
   credentials.
 - **Everything else goes through the CLIs:** `gh`, `gws`, `claude`, `codex`, `git`.
 
@@ -408,7 +408,7 @@ doesn't fail on the other and the log doesn't call it unreadable every hour.
 [Terms of Use](https://openai.com/policies/terms-of-use/).
 
 **What if the quota numbers stop working?** Neither provider documents the quota
-endpoints remainderbot reads. For Claude it's the OAuth usage endpoint that Claude Code
+endpoints RemainderBot reads. For Claude it's the OAuth usage endpoint that Claude Code
 uses; for Codex, `account/rateLimits/read` on `codex app-server`. Either can change
 without notice. If one stops answering, the tick skips that provider and logs why.
 Nothing runs on a guess.

@@ -1,4 +1,4 @@
-# remainderbot — design
+# RemainderBot — design
 
 An hourly cron job that notices when a Claude or Codex subscription period is about to
 reset with a meaningful amount of quota unused, and spends that quota on **one finished
@@ -233,7 +233,7 @@ within its first few minutes containing:
 
 `run.execute(decision)`, all subprocess calls from Python:
 
-1. Create branch `run/<id>` in the remainderbot clone, where `<id>` is
+1. Create branch `run/<id>` in the RemainderBot clone, where `<id>` is
    `YYYYMMDD-HHMM-<provider>`, and the directory `runs/<id>/log/`.
 2. Render `prompts/worker.md` with `{id, provider, deadline_utc, size}` and the goal file
    paths; write it to `runs/<id>/prompt.md` so the exact prompt is part of the record.

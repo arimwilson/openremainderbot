@@ -11,7 +11,7 @@ something out on your setup, though, that is a docs bug, and an issue is welcome
 ## Ground rules
 
 - **Standard library only, Python 3.11+.** No dependencies, so that installing
-  remainderbot means cloning it.
+  RemainderBot means cloning it.
 - **Tests need no network.** Run them with `python3 -m unittest discover -s tests`.
   External CLIs are faked: `tests/fake_gh.py`, `tests/fake_gws.py`, and
   `tests/fake_codex.py` are put on `PATH` in place of the real ones.
