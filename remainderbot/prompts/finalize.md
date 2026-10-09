@@ -50,4 +50,9 @@ provider {provider}, size {size}, deadline {deadline_utc}, finished via finalize
 (main run ended without DONE), quota before: {quota_before}.
 ```
 
+A next step that uses a file from `runs/{id}/` (a patch, a script) starts with
+`gh pr checkout run/{id}`: the user's clone is on `main`, where the run directory does not
+exist. For a patch:
+`gh pr checkout run/{id} && git -C <target checkout> am "$PWD/runs/{id}/artifact.patch"`.
+
 Finish with `git add -A runs/{id} && git commit -m "run {id}: finalize"`.

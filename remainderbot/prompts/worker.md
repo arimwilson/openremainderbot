@@ -135,6 +135,13 @@ them, shortest first, and say why it could not be one.
 provider, size, start/deadline, finished with DONE or via finalize, quota before/after.
 ```
 
+   For *Your one next step*: the user starts from a clone of this repo on `main`, where
+   `runs/{id}/` does not exist (the wrapper puts this checkout back on `main` too). So a
+   step that uses a file from the run directory, such as `artifact.patch` or a script
+   under `artifact/`, starts with `gh pr checkout run/{id}` in that clone, which works
+   before and after the merge. For a patch, where `<target checkout>` is the user's
+   checkout of the repo the patch is for:
+   `gh pr checkout run/{id} && git -C <target checkout> am "$PWD/runs/{id}/artifact.patch"`.
    For the *Run* section: provider {provider}, size {size}, deadline {deadline_utc},
    quota before: {quota_before}. The wrapper appends the after-run quota.
    Say which sources the artifact drew on. Private sources this run: {private_sources}.

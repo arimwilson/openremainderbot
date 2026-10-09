@@ -387,6 +387,12 @@ The chat line is written by `run.execute` next to the quota footer, so it is in 
 itself, not only in the PR. It carries no repo path: `gh pr checkout` finds the branch through
 the PR, before or after the merge.
 
+*Your one next step* starts the same way when it uses a file from the run directory. The
+user's clone is on `main`, and so is the server's once the run ends, and `runs/<id>/` is not
+there until the merge. So a patch ships with
+`gh pr checkout run/<id> && git -C <target checkout> am "$PWD/runs/<id>/artifact.patch"`,
+not with a `git am` of a path that exists only while the run branch is checked out.
+
 `INBOX.md` (root, on main) is the ledger:
 
 ```
