@@ -4,6 +4,9 @@ Your Claude or Codex subscription resets every week, and whatever quota you didn
 gone. RemainderBot notices when a reset is a few hours away with quota left, and spends
 it on finished, easily reviewable pieces of work: pull requests in your own private repo.
 
+Why I built it and how I use it: [RemainderBot: My part-time assistant runs on tokens I
+was going to waste](https://www.ariwilson.com/writing/openremainderbot).
+
 [![A run's pull request: "Groomer time off and breaks", with the task, why it was chosen,
 and what exists now](examples/groomer-time-off/pr.png)](examples/)
 
