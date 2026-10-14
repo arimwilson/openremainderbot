@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -188,6 +189,51 @@ class Execute(unittest.TestCase):
         self.assertTrue(r.finalized)
         self.assertTrue(any("quota wall detected; sleeping" in l for l in self.logs), self.logs)
         self.assertGreater((datetime.now() - t0).total_seconds(), 1)
+
+    def at_wall(self, fh_used, weekly_used, fh_in):
+        """read_all as it looks right after a wall: the 5h window refills in `fh_in` seconds."""
+        now = int(datetime.now(tz=timezone.utc).timestamp())
+        u = usage.Usage("codex", "plus", usage.Window(fh_used, now + fh_in), usage.Window(weekly_used, now + 86400))
+        return mock.patch.object(run.usage_mod, "read_all", lambda providers: {"codex": u})
+
+    def wall_sleeps(self, waits):
+        """Patch time.sleep so the wall's wait is recorded in `waits` instead of slept. Sub-second
+        sleeps still happen: subprocess polls the CLI with them."""
+        real = time.sleep
+        return mock.patch.object(run.time, "sleep", lambda s: waits.append(s) if s >= 1 else real(s))
+
+    def test_5h_wall_does_not_wait_for_a_far_refill(self):
+        # the weekly reset is 20 min out, so a weekly wall would sleep the 15-min buffer; the 5h
+        # window refills in 3h, so there is nothing to wait for
+        waits = []
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "ratelimit"}), self.at_wall(100, 40, 3 * 3600), \
+                self.wall_sleeps(waits):
+            r = run.execute(self.decision(), self.config, self.logs.append)
+        self.assertEqual(waits, [])
+        self.assertEqual((r.quota_limit, r.outcome), ("5h", "quota_5h"))
+        self.assertTrue(r.finalized)
+        self.assertTrue(any("5-hour limit ran out" in l for l in self.logs), self.logs)
+        info = json.loads(self.git("show", f"{r.branch}:runs/{r.id}/run.json"))
+        self.assertEqual(info["quota_limit"], "5h")
+
+    def test_5h_wall_waits_for_a_near_refill(self):
+        waits = []
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "ratelimit"}), self.at_wall(100, 40, 120), \
+                self.wall_sleeps(waits):
+            r = run.execute(self.decision(), self.config, self.logs.append)
+        self.assertEqual(r.outcome, "quota_5h")
+        self.assertEqual(len(waits), 1, waits)
+        self.assertTrue(100 < waits[0] <= 120, waits)
+
+    def test_weekly_wall(self):
+        waits = []
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "ratelimit"}), self.at_wall(100, 100, 3 * 3600), \
+                self.wall_sleeps(waits):
+            r = run.execute(self.decision(), self.config, self.logs.append)
+        self.assertEqual((r.quota_limit, r.outcome), ("weekly", "quota_weekly"))
+        # unchanged: wait for the weekly reset, at most the buffer
+        self.assertEqual(len(waits), 1, waits)
+        self.assertTrue(14 * 60 < waits[0] <= 15 * 60, waits)
 
     def test_refuses_dirty_repo(self):
         (self.repo / "GOALS.md").write_text("changed\n")

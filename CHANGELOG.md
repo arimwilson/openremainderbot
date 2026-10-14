@@ -11,7 +11,8 @@ The first public release.
 - **Trigger.** An hourly `tick` reads Claude Code's and Codex's own quota numbers. It runs
   when the weekly reset is within `WINDOW_HOURS` and at least `MIN_REMAINING` percent of
   the weekly and 5-hour quota is left. After a run that finishes, it runs again in the
-  same period if quota and time remain.
+  same period if quota and time remain. So it does after a run the 5-hour limit cut off,
+  once that window refills; a run stopped by the weekly limit ends the period.
 - **Runs.** One task per run, picked from `GOALS.md`, the source snapshot, and the
   verdicts in `INBOX.md`. The agent checks that the task is still open, and commits
   `PLAN.md` before building. Each run has a hard deadline, sized to the quota left. A

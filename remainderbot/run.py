@@ -34,14 +34,15 @@ class RunResult:
     timed_out: bool
     readme_exists: bool
     quota_wall: bool = False
+    quota_limit: str | None = None  # the limit a quota wall hit: "5h", "weekly", or None if unclear
 
     @property
     def outcome(self) -> str:
-        """One of decide.OUTCOMES; only "done" lets the period run again."""
+        """One of decide.OUTCOMES; the decide.RERUNNABLE ones let the period run again."""
         if self.done:
             return "done"
         if self.quota_wall:
-            return "quota"
+            return {"5h": "quota_5h", "weekly": "quota_weekly"}.get(self.quota_limit, "quota")
         if self.timed_out:
             return "timeout"
         if self.exit_code not in (0, None):
@@ -255,6 +256,21 @@ def hit_quota_wall(log_path: Path) -> bool:
     return any(_RATE_LIMIT_RE.search(l) and re.search(r"error", l, re.I) for l in lines)
 
 
+def wall_limit(u: usage_mod.Usage | usage_mod.UsageError | None, min_remaining: float) -> str | None:
+    """Which limit a quota wall hit: "weekly", "5h", or None when the usage numbers can't tell.
+
+    The CLIs' errors don't say (Codex reports `usageLimitExceeded` for either window), so this
+    reads usage taken right after the wall, against the threshold the rule uses. Weekly wins
+    when both are low: a rerun this period would stop at it anyway."""
+    if not isinstance(u, usage_mod.Usage):
+        return None
+    if u.weekly.remaining_pct < min_remaining:
+        return "weekly"
+    if u.five_hour.remaining_pct < min_remaining:
+        return "5h"
+    return None
+
+
 def _seconds_until(deadline: datetime) -> float:
     return (deadline - datetime.now(tz=timezone.utc)).total_seconds()
 
@@ -322,11 +338,25 @@ def execute(decision: Decision, config: Config, log=print,
         done = (run_dir / "DONE").exists()
         finalized = False
         quota_wall = False
+        quota_limit = None
         if not done:
             # 5. finalize on a small budget, waiting out a quota wall if that is what stopped us
             quota_wall = hit_quota_wall(main_log)
             if quota_wall:
-                wait = min(_seconds_until(_reset_time(decision)), config.deadline_buffer_minutes * 60)
+                at_wall = usage_mod.read_all([provider]).get(provider)
+                quota_limit = wall_limit(at_wall, config.min_remaining)
+                buffer_s = config.deadline_buffer_minutes * 60
+                if quota_limit == "5h":
+                    # the 5-hour window refills on its own clock, usually hours away: wait for it
+                    # only when that falls within the buffer, as the weekly reset does at a deadline
+                    refill = at_wall.five_hour.resets_at
+                    until = _seconds_until(datetime.fromtimestamp(refill, tz=timezone.utc)) if refill else 0
+                    wait = until if until <= buffer_s else 0
+                    log("quota wall: the 5-hour limit ran out; the weekly quota is still there")
+                else:
+                    wait = min(_seconds_until(_reset_time(decision)), buffer_s)
+                    log("quota wall: the weekly limit ran out" if quota_limit
+                        else "quota wall: usage does not show which limit ran out; treating it as weekly")
                 if wait > 0:
                     log(f"quota wall detected; sleeping {int(wait)}s until the reset")
                     time.sleep(wait)
@@ -359,7 +389,7 @@ def execute(decision: Decision, config: Config, log=print,
         info.update({
             "ended_utc": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "done": done, "finalized": finalized, "exit_code": exit_code, "timed_out": timed_out,
-            "quota_wall": quota_wall,
+            "quota_wall": quota_wall, "quota_limit": quota_limit,
             "usage_after": _usage_json(usage_after), "command": shlex.join(cmd),
         })
         (run_dir / "run.json").write_text(json.dumps(info, indent=2) + "\n")
@@ -373,7 +403,7 @@ def execute(decision: Decision, config: Config, log=print,
         if git(config, "status", "--porcelain", str(run_dir)).strip():
             git(config, "commit", "-q", "-m", f"run {run_id}: {'done' if done else 'finalized'}")
         return RunResult(run_id, branch, run_dir, done, finalized, exit_code, timed_out,
-                         readme.exists(), quota_wall)
+                         readme.exists(), quota_wall, quota_limit)
     finally:
         # before leaving the branch: the run's own .gitignore files vanish with it
         _clean_ignored(config, run_dir, log)

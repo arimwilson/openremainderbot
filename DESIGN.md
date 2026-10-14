@@ -58,7 +58,7 @@ eligible =
       weekly.resets_at - now      <= WINDOW_HOURS   (default 4h)
   and 100 - weekly.used_pct       >= MIN_REMAINING  (default 10)
   and 100 - five_hour.used_pct    >= MIN_REMAINING  (5h window must not be the binding limit)
-  and the previous run in this period, if any, ended with DONE
+  and the previous run in this period, if any, ended with DONE or at the 5-hour limit
   and (if there was a previous run) deadline - now >= MIN_RERUN_MINUTES (default 20)
   and no other tick currently running (the tick-level lock in 6.4)
 ```
@@ -66,13 +66,18 @@ eligible =
 State is `state.json`, one entry per provider:
 `{ "codex": {"last_reset_seen": 1789832305, "runs": 1, "last_run_id": "...", "last_outcome": "done"} }`.
 The period is claimed with `last_outcome: "running"` before the CLI starts and updated to
-`done`, `timeout`, `quota`, `crashed`, or `abandoned` when it returns.
+`done`, `timeout`, `quota_5h`, `quota_weekly`, `quota`, `crashed`, or `abandoned` when it
+returns. A run stopped by a quota wall is `quota_5h` or `quota_weekly` by which window the
+usage read right after the wall shows spent (the CLIs' errors don't say). It is plain
+`quota` when neither is, and in state files written before the two were told apart.
 
 Quota is the resource; the outcome is the memory. There is no fixed cap on runs per
 period. A run that hit DONE may be followed by another while quota is still above the
 threshold and MIN_RERUN_MINUTES remain, so a small artifact finished early does not strand the rest
 of the quota; the tick re-evaluates the rule and starts the next run immediately rather
-than waiting for the next hourly tick. Any other outcome blocks the period, because a run that failed fast used
+than waiting for the next hourly tick. A run that the 5-hour limit cut off (`quota_5h`)
+may be followed by another too: the weekly quota it was spending is still there, and the
+5-hour check holds the next run until that window refills. Any other outcome blocks the period, because a run that failed fast used
 almost no quota and a quota-only rule would relaunch it every hour until the reset. A tick
 that dies mid-run leaves `running` behind, which blocks the same way.
 
@@ -343,7 +348,11 @@ Two further settings matter and are recorded in the README's *Run* section:
   finalize pass cannot run on the same provider until `resets_at`. The wrapper then
   sleeps until the reset (at most the 15-minute buffer) and runs finalize on fresh quota
   at `medium` effort with a 10-minute cap. That is the only case where the bot spends
-  quota from the new period, and it is bounded.
+  quota from the new period, and it is bounded. When the usage read at the wall shows the
+  5-hour window spent and the weekly one not, the reset to wait for is the 5-hour one: the
+  wrapper sleeps only if it is within the buffer. Otherwise finalize runs at once and
+  usually stops at the same wall, so the run keeps the README the agent wrote or gets
+  the placeholder.
 
 ## 5. Explaining itself
 

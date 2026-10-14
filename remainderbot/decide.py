@@ -49,10 +49,14 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-# outcomes a run can end with; only "done" (the agent wrote DONE) permits another run in
-# the same period. "running" is what a claim leaves behind until the run reports back, so
-# a tick that dies mid-run also blocks a retry.
-OUTCOMES = ("running", "done", "timeout", "quota", "crashed", "abandoned")
+# outcomes a run can end with. "done" (the agent wrote DONE) and "quota_5h" (the 5-hour limit
+# stopped it, so the weekly quota is still there) permit another run in the same period; the
+# 5-hour check holds that run until the window refills. "quota_weekly" blocks the period, and
+# so does plain "quota": a wall the usage numbers could not pin on either window, and every
+# quota outcome recorded before the two were told apart. "running" is what a claim leaves
+# behind until the run reports back, so a tick that dies mid-run also blocks a retry.
+OUTCOMES = ("running", "done", "timeout", "quota", "quota_5h", "quota_weekly", "crashed", "abandoned")
+RERUNNABLE = ("done", "quota_5h")
 
 
 def period_entry(state: dict, provider: str, resets_at: int) -> dict | None:
@@ -130,11 +134,12 @@ def check(provider: str, usage: Usage | UsageError, state: dict, config: Config,
         if outcome == "running":
             return None, (f"{provider}: run {last_id} is still marked running this period "
                           f"(tick died mid-run?); not retrying")
-        if outcome != "done":
+        if outcome not in RERUNNABLE:
             return None, (f"{provider}: run {last_id} ended {outcome}; not retrying this period "
                           f"(reset {fmt_reset(u.weekly.resets_at)})")
         if minutes_left < config.min_rerun_minutes:
-            return None, (f"{provider}: run {last_id} was done, but only {minutes_left:.0f} min "
+            ended = "was done" if outcome == "done" else f"ended {outcome}"
+            return None, (f"{provider}: run {last_id} {ended}, but only {minutes_left:.0f} min "
                           f"left before the deadline (< {config.min_rerun_minutes}); not rerunning")
     d = Decision(
         provider=provider,
