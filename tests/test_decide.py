@@ -106,11 +106,32 @@ class Rule(unittest.TestCase):
 
     def test_failed_outcomes_block_rerun(self):
         us = {"codex": u("codex", self.now)}
-        for outcome in ("timeout", "quota", "crashed", "abandoned"):
+        # plain "quota" is also what state.json files from before the 5h/weekly split carry
+        for outcome in ("timeout", "quota", "quota_weekly", "crashed", "abandoned"):
             state = decide.record_outcome({}, "codex", us["codex"].weekly.resets_at, "r1", outcome)
             d, reasons = decide.evaluate(us, state, cfg(providers=["codex"]), self.now)
             self.assertIsNone(d, outcome)
-            self.assertIn(f"ended {outcome}", reasons[0])
+            self.assertIn(f"ended {outcome}; not retrying", reasons[0])
+
+    def test_5h_wall_reruns_once_the_window_refills(self):
+        resets_at = u("codex", self.now).weekly.resets_at
+        state = decide.record_outcome({}, "codex", resets_at, "r1", "quota_5h")
+        # the 5h window is still spent: held by the 5h check, not blocked for the period
+        d, reasons = decide.evaluate({"codex": u("codex", self.now, fh_used=100)}, state,
+                                     cfg(providers=["codex"]), self.now)
+        self.assertIsNone(d)
+        self.assertIn("would stall", reasons[0])
+        # refilled: eligible again
+        d, reasons = decide.evaluate({"codex": u("codex", self.now, fh_used=0)}, state,
+                                     cfg(providers=["codex"]), self.now)
+        self.assertIsNotNone(d)
+        self.assertIn("eligible", reasons[0])
+        # MIN_RERUN_MINUTES still applies
+        late = {"codex": u("codex", self.now, fh_used=0, weekly_in=timedelta(minutes=70))}
+        state = decide.record_outcome({}, "codex", late["codex"].weekly.resets_at, "r1", "quota_5h")
+        d, reasons = decide.evaluate(late, state, cfg(providers=["codex"]), self.now)
+        self.assertIsNone(d)
+        self.assertIn("ended quota_5h, but only", reasons[0])
 
     def test_done_allows_rerun_while_quota_and_time_remain(self):
         us = {"codex": u("codex", self.now)}  # 50% left, reset in 2h -> 1h45 to the deadline

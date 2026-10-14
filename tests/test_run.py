@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from remainderbot import run
+from remainderbot import run, usage
 from remainderbot.config import Config
 
 
@@ -73,6 +73,16 @@ class Render(unittest.TestCase):
             self.assertTrue(run.hit_quota_wall(p))
             p.write_text('{"type":"result","text":"the rate limit is fine"}\n')
             self.assertFalse(run.hit_quota_wall(p))
+
+    def test_wall_limit(self):
+        def at(fh_used, weekly_used):
+            return usage.Usage("codex", "plus", usage.Window(fh_used, 1), usage.Window(weekly_used, 2))
+        self.assertEqual(run.wall_limit(at(100, 50), 10), "5h")
+        self.assertEqual(run.wall_limit(at(20, 100), 10), "weekly")
+        self.assertEqual(run.wall_limit(at(100, 95), 10), "weekly")  # both low: weekly is the one that binds
+        self.assertIsNone(run.wall_limit(at(20, 50), 10))  # neither spent, e.g. a burst limit
+        self.assertIsNone(run.wall_limit(usage.UsageError("codex: down"), 10))
+        self.assertIsNone(run.wall_limit(None, 10))
 
 
 class SourcesBlock(unittest.TestCase):
