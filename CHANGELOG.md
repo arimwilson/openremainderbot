@@ -16,7 +16,8 @@ The first public release.
 - **Runs.** One task per run, picked from `GOALS.md`, the source snapshot, and the
   verdicts in `INBOX.md`. The agent checks that the task is still open, and commits
   `PLAN.md` before building. Each run has a hard deadline, sized to the quota left. A
-  finalize pass may only cut scope.
+  finalize pass may only cut scope. When a run ends, its directory is named after its
+  README title, `runs/<id>-<title>/`, so `ls runs/` says what each run did.
 - **Publishing.** Each run opens a PR in your private instance repo, with the run's
   README as its body. `INBOX.md` follows the PRs: merged means approved, closed means
   rejected, and the last comment is the note the next run reads. A failed publish is

@@ -190,7 +190,8 @@ ends, `run` goes back to `main`. Nothing is pushed unless you add `--publish`. T
 what it made:
 
 ```sh
-git show run/<id>:runs/<id>/README.md
+git ls-tree --name-only run/<id> runs/ | grep <id>   # runs/<id>-<title>, named after the README
+git show run/<id>:runs/<id>-<title>/README.md
 git checkout run/<id>     # look around, then: git checkout main
 ```
 
@@ -228,8 +229,8 @@ clean ticks, take `RUN_DISABLED=1` off the crontab line.
   in GitHub's email notification settings, or give the bot its own account.
 - **Each run's README** (the PR body) says what exists now, how it was verified, and your
   one next step: merge, `git am` a patch, paste a draft, or run one command. The work
-  itself is in `runs/<id>/artifact/`, or in `artifact.patch` when it belongs in another
-  repo.
+  itself is in `runs/<id>-<title>/artifact/`, or in `artifact.patch` when it belongs in
+  another repo.
 - **Merge** means approved. **Close** means rejected. The last PR comment or review is
   the note the next run reads, so before you close a PR, say what should change.
 - **`INBOX.md`** is the ledger on `main`: one row per run, with its status and your note.
@@ -371,7 +372,7 @@ Environment variables, set on the crontab line or as `NAME=value` lines above it
   `--fallback-model`. The model that actually answered is in the run log:
 
   ```sh
-  grep '"type":"assistant"' runs/<id>/log/claude.jsonl | grep -o '"model":"[^"]*"' | sort | uniq -c
+  grep '"type":"assistant"' runs/<id>*/log/claude.jsonl | grep -o '"model":"[^"]*"' | sort | uniq -c
   ```
 
   The log's `init` line names the requested model even after a fallback, so don't rely

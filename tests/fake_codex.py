@@ -4,7 +4,8 @@
 Reads the prompt on stdin like the real CLI, finds the run id in it, and behaves per
 FAKE_MODE: done (writes PLAN/README/DONE and commits), nodone (no README, no DONE),
 hang (sleeps until killed), ratelimit (logs a rate-limit error and exits 1).
-The finalize prompt is recognized by its title and always yields a trimmed README.
+The finalize prompt is recognized by its title and yields a trimmed README, or none
+with FAKE_FINALIZE=none.
 """
 import json
 import os
@@ -27,6 +28,8 @@ def commit(msg, path=run_dir):
 
 
 if prompt.startswith("# remainderbot finalize pass"):
+    if os.environ.get("FAKE_FINALIZE") == "none":
+        sys.exit(0)
     with open(os.path.join(run_dir, "README.md"), "w") as f:
         f.write("# Fake trimmed                 status: trimmed\n\n## Run\nvia finalize\n")
     commit(f"run {run_id}: finalize")
@@ -56,7 +59,8 @@ if junk:  # ignored files the wrapper should clean up (all but log/); "logdir" i
     subprocess.run(["git", "init", "-q", os.path.join(run_dir, "artifact", "clone")], check=True)
 if mode == "done":
     with open(os.path.join(run_dir, "README.md"), "w") as f:
-        f.write("# Fake done                 status: complete\n\n## Run\ncodex small\n")
+        f.write("# Fake done                 status: complete\n\n## What exists now\n"
+                f"- `runs/{run_id}/artifact/thing.md`\n\n## Run\ncodex small\n")
     open(os.path.join(run_dir, "DONE"), "w").close()
 commit(f"run {run_id}: {mode}")
 print(json.dumps({"type": "result", "mode": mode}))

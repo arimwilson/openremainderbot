@@ -81,7 +81,7 @@ class Publish(unittest.TestCase):
 
     def test_publish_then_sync(self):
         r = self.execute("20260912-1200-codex")
-        url = publish.pr(r.run_dir, self.config, self.logs.append)
+        url = publish.pr(r.id, self.config, self.logs.append)
         self.assertEqual(url, "https://github.com/example/remainderbot/pull/1")
 
         # branch and main are on origin; the PR body is the README verbatim
@@ -92,7 +92,9 @@ class Publish(unittest.TestCase):
         (pr,) = self.prs()
         self.assertEqual(pr["headRefName"], "run/20260912-1200-codex")
         self.assertEqual(pr["baseRefName"], "main")
-        self.assertEqual(pr["body"], self.git("show", "run/20260912-1200-codex:runs/20260912-1200-codex/README.md"))
+        self.assertEqual(run.run_path(self.config, "run/20260912-1200-codex", "20260912-1200-codex"),
+                         "runs/20260912-1200-codex-fake-done")
+        self.assertEqual(pr["body"], self.git("show", "run/20260912-1200-codex:runs/20260912-1200-codex-fake-done/README.md"))
         self.assertEqual(pr["title"], "Fake done")
 
         # the ledger row and state, committed on main, tree clean, still on main
@@ -118,7 +120,7 @@ class Publish(unittest.TestCase):
         self.assertEqual(self.git("status", "--porcelain").strip(), "")
 
         # publishing again is idempotent: same PR, the synced verdict is kept
-        self.assertEqual(publish.pr(r.run_dir, self.config, self.logs.append), url)
+        self.assertEqual(publish.pr(r.id, self.config, self.logs.append), url)
         self.assertEqual(len(self.prs()), 1)
         self.assertEqual(self.rows()[0].status, "approved")
 
@@ -131,7 +133,7 @@ class Publish(unittest.TestCase):
         readme.write_text(readme.read_text().replace("status: trimmed", "status: abandoned"))
         self.git("commit", "-qam", "abandon")
         self.git("checkout", "-q", "main")
-        publish.pr(r.run_dir, self.config, self.logs.append)
+        publish.pr(r.id, self.config, self.logs.append)
         self.assertEqual(self.prs()[0]["title"], "Fake trimmed [abandoned]")
         self.assertEqual(self.rows()[0].status, "abandoned")
         # closing the PR keeps it abandoned rather than calling it rejected
@@ -141,10 +143,19 @@ class Publish(unittest.TestCase):
         inbox.sync(self.config, self.logs.append)
         self.assertEqual(self.rows()[0].status, "abandoned")
 
+    def test_run_without_a_title_directory_publishes(self):
+        # a placeholder README leaves runs/<id> as it is, as do runs from before directories were named
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "nodone", "FAKE_FINALIZE": "none"}):
+            r = self.execute("20260912-1310-codex")
+        self.assertEqual(run.run_path(self.config, r.branch, r.id), "runs/20260912-1310-codex")
+        self.assertIsNotNone(publish.pr(r.id, self.config, self.logs.append))
+        self.assertEqual(self.prs()[0]["title"], "Run 20260912-1310-codex [abandoned]")
+        self.assertEqual(self.rows()[0].status, "abandoned")
+
     def test_failure_is_remembered_and_retried(self):
         r = self.execute("20260912-1400-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_FAIL": "1"}):
-            self.assertIsNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNone(publish.pr(r.id, self.config, self.logs.append))
         state = load_state(self.repo / "state.json")
         self.assertEqual(state["unpublished"]["20260912-1400-codex"]["attempts"], 1)
         self.assertIn("api.github.com", state["unpublished"]["20260912-1400-codex"]["error"])
@@ -173,7 +184,7 @@ class Publish(unittest.TestCase):
         r = self.execute("20260912-1500-codex")
         main_on_origin = self.git("ls-remote", str(self.origin), "main")
         with mock.patch.dict(os.environ, {"FAKE_GH_VISIBILITY": "PUBLIC"}):
-            self.assertIsNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNone(publish.pr(r.id, self.config, self.logs.append))
             self.assertEqual(inbox.sync(self.config, self.logs.append), 0)
         self.assertNotIn("run/", self.branches_on_origin())
         self.assertEqual(self.git("ls-remote", str(self.origin), "main"), main_on_origin)  # not even main
@@ -187,7 +198,7 @@ class Publish(unittest.TestCase):
     def test_gh_that_cannot_answer_gets_nothing_pushed(self):
         r = self.execute("20260912-1510-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_FAIL": "1"}):
-            self.assertIsNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNone(publish.pr(r.id, self.config, self.logs.append))
         self.assertNotIn("run/", self.branches_on_origin())
         error = load_state(self.repo / "state.json")["unpublished"]["20260912-1510-codex"]["error"]
         self.assertTrue(error.startswith("cannot tell whether origin is private"), error)
@@ -195,11 +206,11 @@ class Publish(unittest.TestCase):
     def test_internal_origin_and_allow_public_repo_publish(self):
         r = self.execute("20260912-1520-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_VISIBILITY": "INTERNAL"}):
-            self.assertIsNotNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNotNone(publish.pr(r.id, self.config, self.logs.append))
         self.config.allow_public_repo = True
         r = self.execute("20260912-1530-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_VISIBILITY": "PUBLIC"}):
-            self.assertIsNotNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNotNone(publish.pr(r.id, self.config, self.logs.append))
         self.assertIn("refs/heads/run/20260912-1530-codex", self.branches_on_origin())
 
     def test_gh_is_asked_once_and_every_pr_call_names_origin(self):
@@ -210,7 +221,7 @@ class Publish(unittest.TestCase):
         calls = self.td / "gh_calls.jsonl"
         r = self.execute("20260912-1540-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_CALLS": str(calls)}):
-            publish.pr(r.run_dir, self.config, self.logs.append)
+            publish.pr(r.id, self.config, self.logs.append)
             inbox.sync(self.config, self.logs.append)
         args = [json.loads(l) for l in calls.read_text().splitlines()]
         self.assertEqual(sum(a[:2] == ["repo", "view"] for a in args), 1)
@@ -228,7 +239,7 @@ class Publish(unittest.TestCase):
         public = json.dumps({str(mirror): {"nameWithOwner": "example/mirror", "visibility": "PUBLIC"}})
         r = self.execute("20260912-1550-codex")
         with mock.patch.dict(os.environ, {"FAKE_GH_REPOS": public}):
-            self.assertIsNone(publish.pr(r.run_dir, self.config, self.logs.append))
+            self.assertIsNone(publish.pr(r.id, self.config, self.logs.append))
         for repo in (self.origin, mirror):
             self.assertNotIn("run/", self.git("ls-remote", "--heads", str(repo)))
         error = load_state(self.repo / "state.json")["unpublished"]["20260912-1550-codex"]["error"]

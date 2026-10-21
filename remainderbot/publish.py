@@ -17,7 +17,7 @@ from . import decide as decide_mod
 from . import inbox
 from . import origin
 from .config import Config
-from .run import git
+from .run import git, run_path
 
 _TITLE_RE = re.compile(r"^#\s+(?P<title>.*?)\s*(?:status:\s*(?P<status>[a-z]+))?\s*$")
 _TASK_RE = re.compile(r"\*\*Task\*\*\s*[—–-]*\s*(?P<task>.*?)(?:\s+Source:|\s*$)", re.S)
@@ -169,10 +169,9 @@ def _mark_published(config: Config, run_id: str, provider: str, url: str) -> Non
 
 # --- pr -----------------------------------------------------------------------
 
-def pr(run_dir: Path, config: Config, log=print) -> str | None:
+def pr(run_id: str, config: Config, log=print) -> str | None:
     """Push run/<id>, open (or find) its PR, write the INBOX.md row, commit on main.
     Returns the PR URL, or None if the publish failed (it will be retried next tick)."""
-    run_id = run_dir.name
     branch = f"run/{run_id}"
     try:
         return _pr(run_id, branch, config, log)
@@ -183,7 +182,7 @@ def pr(run_dir: Path, config: Config, log=print) -> str | None:
 
 
 def _pr(run_id: str, branch: str, config: Config, log=print) -> str:
-    rel = f"runs/{run_id}"
+    rel = run_path(config, branch, run_id)
     readme = git(config, "show", f"{branch}:{rel}/README.md")
     try:
         provider = json.loads(git(config, "show", f"{branch}:{rel}/run.json")).get("provider")
@@ -223,4 +222,4 @@ def retry_unpublished(config: Config, log=print) -> None:
     pending = decide_mod.load_state(config.state_path).get("unpublished") or {}
     for run_id in sorted(pending):
         log(f"publish {run_id}: retrying (attempt {pending[run_id].get('attempts', 0) + 1})")
-        pr(config.runs_dir / run_id, config, log)
+        pr(run_id, config, log)

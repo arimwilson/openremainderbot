@@ -259,7 +259,14 @@ within its first few minutes containing:
    and the log tail, and must do exactly one of: (a) trim to the working subset, make it
    pass, write `README.md` honestly; or (b) write `README.md` with status `abandoned` and
    why. It may not add features.
-6. Commit whatever is in the run directory, then hand the branch to `publish.pr()`
+6. If the agent wrote `README.md`, rename `runs/<id>/` to `runs/<id>-<slug>/`, so that
+   `ls runs/` says what each run did. The slug is the README title in lowercase words,
+   cut at a word boundary to at most 40 characters. Paths into `runs/<id>` in the run's
+   top-level Markdown (README, PLAN, prompts) are pointed at the new name; the start
+   commit keeps the prompt as the agent read it. The id stays the run's key: the branch
+   `run/<id>`, `INBOX.md`, and `state.json` use it, and `publish.pr()` finds the directory
+   on the branch by it. A placeholder README keeps `runs/<id>/`. Then commit whatever is
+   in the run directory, and hand the branch to `publish.pr()`
    (section 6.1, phase 7), which pushes, opens the PR with the README as the body, and
    writes the `needs-review` row to `INBOX.md` on main.
 
@@ -284,7 +291,7 @@ within its first few minutes containing:
 ### 4.3 Artifact location
 
 ```
-runs/<id>/
+runs/<id>-<slug>/  runs/<id>/ until the run ends (4.1, step 6)
   snapshot/        the goals/snapshot/ the agent read, copied in by the wrapper
   PLAN.md          written first
   README.md        the explanation (template below)
@@ -389,7 +396,7 @@ provider, size, start/deadline, finished with DONE or via finalize, quota before
 ## Chat about this run
 Same harness and model, from any clone of the repo:
 
-    gh pr checkout run/<id> && <claude|codex> <the run's model and effort> "<prompt pointing at runs/<id>/>"
+    gh pr checkout run/<id> && <claude|codex> <the run's model and effort> "<prompt pointing at runs/<id>-<slug>/>"
 ```
 
 The chat line is written by `run.execute` next to the quota footer, so it is in the run record

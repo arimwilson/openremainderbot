@@ -74,43 +74,65 @@ class Execute(unittest.TestCase):
         self.assertTrue(r.done and not r.finalized and not r.timed_out and r.exit_code == 0)
         self.assertEqual(r.outcome, "done")
         self.assertEqual(r.branch, "run/20260912-1200-codex")
+        # the README's title names the directory; the branch keeps the bare id
+        self.assertEqual(r.run_dir.name, "20260912-1200-codex-fake-done")
+        d = "runs/20260912-1200-codex-fake-done"
+        self.assertIn(f"renamed runs/20260912-1200-codex to {d}", self.logs)
         # back on main, and main did not get the run
         self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
         self.assertFalse((self.repo / "runs").exists())
         files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
         for f in ("prompt.md", "run.json", "PLAN.md", "README.md", "DONE", "artifact/thing.md", "log/codex.jsonl",
                   "snapshot/tasks.md"):
-            self.assertIn(f"runs/20260912-1200-codex/{f}", files, f)
+            self.assertIn(f"{d}/{f}", files, f)
+        self.assertEqual([f for f in files if f.startswith("runs/20260912-1200-codex/")], [])
         self.assertNotIn("goals/snapshot/tasks.md", files)  # never committed from main, only the run's copy
-        # the copy is in the very first commit of the run, alongside the prompt
+        # the copy is in the very first commit of the run, alongside the prompt, under the bare id;
+        # that commit keeps the prompt exactly as the agent read it
         first = self.git("log", r.branch, "--format=%H", "--diff-filter=A", "--", "runs/20260912-1200-codex/prompt.md").strip()
         self.assertIn("runs/20260912-1200-codex/snapshot/tasks.md",
                       self.git("show", "--name-only", "--format=", first))
-        show = self.git("show", f"{r.branch}:runs/20260912-1200-codex/README.md")
+        self.assertIn("`runs/20260912-1200-codex/snapshot/`", self.git("show", f"{first}:runs/20260912-1200-codex/prompt.md"))
+        show = self.git("show", f"{r.branch}:{d}/README.md")
+        self.assertIn(f"- `{d}/artifact/thing.md`", show)  # the agent's path into the run follows the rename
         self.assertIn("quota before: codex 5h 3% / weekly 1% used", show)
         self.assertIn("finished: DONE", show)
         # the wrapper closes the README with the chat line: main-run effort, configured model
         self.assertTrue(show.endswith("\n## Chat about this run\nSame harness and model, from any clone of the repo:\n\n"
-                                      "```\n" + run.chat_command("codex", "20260912-1200-codex", self.config.codex_model, "high")
+                                      "```\n" + run.chat_command("codex", "20260912-1200-codex", self.config.codex_model, "high",
+                                                                "20260912-1200-codex-fake-done")
                                       + "\n```\n"), show[-400:])
         self.assertEqual(show.count("## Chat about this run"), 1)
-        prompt = self.git("show", f"{r.branch}:runs/20260912-1200-codex/prompt.md")
+        prompt = self.git("show", f"{r.branch}:{d}/prompt.md")
         self.assertIn("Deadline: " + self.decision().deadline_str[:13], prompt)
         self.assertIn("`GOALS.md`", prompt)
-        self.assertIn("`runs/20260912-1200-codex/snapshot/`", prompt)
+        self.assertIn(f"`{d}/snapshot/`", prompt)
         self.assertIn("One file per source:\n   - `tasks.md` (private: not in sources.toml)\n3. `INBOX.md`", prompt)
-        self.assertIn('Source: runs/20260912-1200-codex/snapshot/<file>', prompt)
+        self.assertIn(f"Source: {d}/snapshot/<file>", prompt)
         self.assertEqual(PLACEHOLDER.findall(prompt), [], "worker.md has keys execute() does not fill")
         # no sources.toml in this repo: nothing to recheck by source, and every file counts as private
         self.assertIn("| Document or plan | search where it would live", prompt)
         self.assertIn("Private sources this run: `tasks.md`.", prompt)
-        info = json.loads(self.git("show", f"{r.branch}:runs/20260912-1200-codex/run.json"))
+        info = json.loads(self.git("show", f"{r.branch}:{d}/run.json"))
         self.assertTrue(info["done"])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", info["command"])
         self.assertIn('model_reasoning_effort="high"', info["command"])
-        log = self.git("show", f"{r.branch}:runs/20260912-1200-codex/log/codex.jsonl")
+        log = self.git("show", f"{r.branch}:{d}/log/codex.jsonl")
         self.assertIn('"prompt_head": "# remainderbot worker run', log)
         self.assertEqual(self.git("log", "--oneline", r.branch).count("\n"), 5)  # init, start, plan, agent done, wrapper done
+
+    def test_placeholder_readme_keeps_the_id(self):
+        # neither the agent nor finalize wrote a README: the placeholder's title would only repeat the id
+        with mock.patch.dict(os.environ, {"FAKE_MODE": "nodone", "FAKE_FINALIZE": "none"}):
+            r = run.execute(self.decision(), self.config, self.logs.append)
+        self.assertEqual(r.run_dir.name, r.id)
+        readme = self.git("show", f"{r.branch}:runs/{r.id}/README.md")
+        self.assertIn("status: abandoned", readme)
+        self.assertIn(f"Read runs/{r.id}/README.md", readme)
+        self.assertFalse(any(l.startswith("renamed ") for l in self.logs), self.logs)
+
+    def rel(self, r):
+        return f"runs/{r.run_dir.name}"
 
     def left_on_disk(self, r):
         return sorted(str(p.relative_to(r.run_dir)) for p in r.run_dir.rglob("*") if p.is_file())
@@ -123,8 +145,10 @@ class Execute(unittest.TestCase):
                 self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
                 files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
                 for f in (".gitignore", "log/codex.jsonl", "log/kept.jsonl"):
-                    self.assertIn(f"runs/{r.id}/{f}", files, f)
+                    self.assertIn(f"{self.rel(r)}/{f}", files, f)
                 self.assertEqual(self.left_on_disk(r), [])  # junk cleaned; the logs are on the branch
+                self.assertNotEqual(r.run_dir.name, r.id)
+                self.assertFalse((self.repo / "runs" / r.id).exists())  # the junk moved with the rename
                 self.assertTrue(any("cleaned ignored files" in l for l in self.logs), self.logs)
 
     def test_logs_over_the_cap_stay_on_disk(self):
@@ -133,9 +157,9 @@ class Execute(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FAKE_MODE": "done", "FAKE_JUNK": "logdir"}):
             r = run.execute(self.decision(), config, self.logs.append)
         files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
-        self.assertNotIn(f"runs/{r.id}/log/codex.jsonl", files)
-        self.assertIn(f"runs/{r.id}/log/kept.jsonl", files)
-        self.assertEqual(self.git("show", f"{r.branch}:runs/{r.id}/log/.gitignore"), "codex.jsonl\n")
+        self.assertNotIn(f"{self.rel(r)}/log/codex.jsonl", files)
+        self.assertIn(f"{self.rel(r)}/log/kept.jsonl", files)
+        self.assertEqual(self.git("show", f"{r.branch}:{self.rel(r)}/log/.gitignore"), "codex.jsonl\n")
         self.assertEqual(self.left_on_disk(r), ["log/codex.jsonl"])
 
     def test_no_done_runs_finalize(self):
@@ -145,15 +169,15 @@ class Execute(unittest.TestCase):
         self.assertEqual(r.outcome, "abandoned")
         self.assertTrue(r.finalized and r.readme_exists)
         files = self.git("ls-tree", "-r", "--name-only", r.branch).split()
-        self.assertIn(f"runs/{r.id}/finalize-prompt.md", files)
-        self.assertIn(f"runs/{r.id}/log/codex-finalize.jsonl", files)
-        fin_prompt = self.git("show", f"{r.branch}:runs/{r.id}/finalize-prompt.md")
+        self.assertIn(f"{self.rel(r)}/finalize-prompt.md", files)
+        self.assertIn(f"{self.rel(r)}/log/codex-finalize.jsonl", files)
+        fin_prompt = self.git("show", f"{r.branch}:{self.rel(r)}/finalize-prompt.md")
         self.assertEqual(PLACEHOLDER.findall(fin_prompt), [], "finalize.md has keys execute() does not fill")
-        readme = self.git("show", f"{r.branch}:runs/{r.id}/README.md")
+        readme = self.git("show", f"{r.branch}:{self.rel(r)}/README.md")
         self.assertIn("status: trimmed", readme)
         self.assertIn("finished: via finalize", readme)
         self.assertIn(f"gh pr checkout run/{r.id} && codex -m", readme)
-        self.assertIn('model_reasoning_effort="medium"', self.git("show", f"{r.branch}:runs/{r.id}/log/codex-finalize.jsonl"))
+        self.assertIn('model_reasoning_effort="medium"', self.git("show", f"{r.branch}:{self.rel(r)}/log/codex-finalize.jsonl"))
 
     def test_deadline_kills_and_finalizes(self):
         with mock.patch.dict(os.environ, {"FAKE_MODE": "hang"}):
@@ -164,7 +188,7 @@ class Execute(unittest.TestCase):
         self.assertEqual(r.outcome, "timeout")
         self.assertIsNone(r.exit_code)
         self.assertTrue(any("killing the process group" in l for l in self.logs))
-        self.assertIn("status: trimmed", self.git("show", f"{r.branch}:runs/{r.id}/README.md"))
+        self.assertIn("status: trimmed", self.git("show", f"{r.branch}:{self.rel(r)}/README.md"))
         self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
 
     def test_rate_limit_waits_then_finalizes(self):
@@ -213,7 +237,7 @@ class Execute(unittest.TestCase):
         self.assertEqual((r.quota_limit, r.outcome), ("5h", "quota_5h"))
         self.assertTrue(r.finalized)
         self.assertTrue(any("5-hour limit ran out" in l for l in self.logs), self.logs)
-        info = json.loads(self.git("show", f"{r.branch}:runs/{r.id}/run.json"))
+        info = json.loads(self.git("show", f"{r.branch}:{self.rel(r)}/run.json"))
         self.assertEqual(info["quota_limit"], "5h")
 
     def test_5h_wall_waits_for_a_near_refill(self):

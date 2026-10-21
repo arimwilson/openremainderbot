@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -143,6 +144,30 @@ def make_id(provider: str, now: datetime | None = None) -> str:
     return f"{now:%Y%m%d-%H%M}-{provider}"
 
 
+def title_slug(title: str, max_len: int = 40) -> str:
+    """A README title as a directory-name suffix: lowercase ASCII words joined by hyphens,
+    cut at a word boundary to at most max_len characters. Empty if no words are left."""
+    ascii_title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-")
+    if len(s) > max_len:
+        head = s[:max_len]
+        s = (head.rsplit("-", 1)[0] if s[max_len] != "-" and "-" in head else head).strip("-")
+    return s
+
+
+def repoint(text: str, run_id: str, dir_name: str) -> str:
+    """`text` with each path into runs/<id> pointing into runs/<dir_name> instead. A longer
+    name that starts with the id, such as runs/<id>-other, is left alone."""
+    return re.sub(rf"runs/{re.escape(run_id)}(?![\w-])", f"runs/{dir_name}", text)
+
+
+def run_path(config: Config, ref: str, run_id: str) -> str:
+    """The run's directory on `ref`, relative to the repo: runs/<id>-<slug> once execute()
+    has named it after the README title, else runs/<id>."""
+    names = git(config, "ls-tree", "--name-only", f"{ref}:runs", check=False).splitlines()
+    return "runs/" + next((n for n in names if n.startswith(run_id + "-")), run_id)
+
+
 def usage_summary(usages: dict) -> str:
     parts = []
     for p, u in sorted(usages.items()):
@@ -155,14 +180,15 @@ def usage_summary(usages: dict) -> str:
 
 # gh checks out the run branch by PR (number, url or branch name all work), so the run
 # directory is present whether or not the PR has merged; no repo path is baked in.
-_CHAT_PROMPT = ("This is remainderbot run {id}. Read runs/{id}/README.md, prompt.md and run.json, "
-                "then the log under runs/{id}/log/ if it is there, and take my questions.")
+_CHAT_PROMPT = ("This is remainderbot run {id}. Read runs/{dir}/README.md, prompt.md and run.json, "
+                "then the log under runs/{dir}/log/ if it is there, and take my questions.")
 
 
-def chat_command(provider: str, run_id: str, model: str, effort: str) -> str:
+def chat_command(provider: str, run_id: str, model: str, effort: str, dir_name: str | None = None) -> str:
     """One shell line that opens an interactive session on the same harness and model as the
-    run, checked out on the run's PR branch and pointed at the run record (DESIGN.md 5)."""
-    prompt = _CHAT_PROMPT.format(id=run_id)
+    run, checked out on the run's PR branch and pointed at the run record (DESIGN.md 5).
+    `dir_name` is the run directory's name under runs/, the id unless execute() renamed it."""
+    prompt = _CHAT_PROMPT.format(id=run_id, dir=dir_name or run_id)
     if provider == "claude":
         cmd = ["claude", "--model", model, "--effort", effort]
     elif provider == "codex":
@@ -172,11 +198,11 @@ def chat_command(provider: str, run_id: str, model: str, effort: str) -> str:
     return f"gh pr checkout run/{run_id} && {shlex.join(cmd)} {shlex.quote(prompt)}"
 
 
-def chat_section(config: Config, provider: str, run_id: str, effort: str) -> str:
+def chat_section(config: Config, provider: str, run_id: str, effort: str, dir_name: str | None = None) -> str:
     """The README's closing section (DESIGN.md 5), appended by the wrapper after the agent."""
     model = config.claude_model if provider == "claude" else config.codex_model
     return ("\n## Chat about this run\nSame harness and model, from any clone of the repo:\n\n"
-            f"```\n{chat_command(provider, run_id, model, effort)}\n```\n")
+            f"```\n{chat_command(provider, run_id, model, effort, dir_name)}\n```\n")
 
 
 def agent_command(config: Config, provider: str, effort: str, run_id: str) -> list[str]:
@@ -379,12 +405,15 @@ def execute(decision: Decision, config: Config, log=print,
                 f.write(f"\nquota before: {before_str}\nquota after: {after_str}\n"
                         f"finished: {'DONE' if done else 'via finalize'}; "
                         f"main run exit={exit_code} timed_out={timed_out}\n")
+            # the agent's title names the directory; the placeholder's would only repeat the id
+            run_dir = _name_after_title(config, run_dir, run_id, log)
+            log_dir, readme = run_dir / "log", run_dir / "README.md"
         else:
             readme.write_text(_placeholder_readme(run_id, provider, decision, before_str, after_str,
                                                   exit_code, timed_out))
             log("no README.md from the agent; wrote an abandoned placeholder")
         with open(readme, "a") as f:
-            f.write(chat_section(config, provider, run_id, effort))
+            f.write(chat_section(config, provider, run_id, effort, run_dir.name))
         info = json.loads((run_dir / "run.json").read_text())
         info.update({
             "ended_utc": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -395,12 +424,14 @@ def execute(decision: Decision, config: Config, log=print,
         (run_dir / "run.json").write_text(json.dumps(info, indent=2) + "\n")
 
         # 6. commit whatever is in the run directory (large logs stay out of git). The other logs
-        # are added with -f: an agent's own .gitignore can list log/ as a whole.
+        # are added with -f: an agent's own .gitignore can list log/ as a whole. Both paths are
+        # added so that a renamed run's files leave runs/<id> in the same commit.
         keep = _ignore_big_logs(log_dir, config.log_max_bytes)
-        git(config, "add", "-A", str(run_dir))
+        paths = sorted({str(config.runs_dir / run_id), str(run_dir)})
+        git(config, "add", "-A", "--", *paths)
         if keep:
             git(config, "add", "-f", "--", *(str(p) for p in keep))
-        if git(config, "status", "--porcelain", str(run_dir)).strip():
+        if git(config, "status", "--porcelain", "--", *paths).strip():
             git(config, "commit", "-q", "-m", f"run {run_id}: {'done' if done else 'finalized'}")
         return RunResult(run_id, branch, run_dir, done, finalized, exit_code, timed_out,
                          readme.exists(), quota_wall, quota_limit)
@@ -411,6 +442,32 @@ def execute(decision: Decision, config: Config, log=print,
         if stray:
             log(f"stray changes outside the run directory are discarded:\n{stray}")
         git(config, "checkout", "-q", "-f", "main", check=False)
+
+
+def _name_after_title(config: Config, run_dir: Path, run_id: str, log=print) -> Path:
+    """Rename runs/<id> to runs/<id>-<slug of the README title>, so that `ls runs/` says what
+    each run did, and repoint the run's top-level Markdown (README, PLAN, prompts) at the new
+    path. The id stays the run's key: the branch, INBOX.md, and state.json use it. Returns the
+    directory; a title with no words, a name already taken, or a failed rename keeps runs/<id>."""
+    from .publish import readme_summary  # late import: publish imports this module
+    title, _status, _task = readme_summary((run_dir / "README.md").read_text(errors="replace"))
+    slug = title_slug(title)
+    new = run_dir.with_name(f"{run_id}-{slug}")
+    if not slug or new.exists():
+        return run_dir
+    try:
+        run_dir.rename(new)
+    except OSError as e:
+        log(f"kept {_rel(config, run_dir)}: renaming it failed: {e}")
+        return run_dir
+    for md in new.glob("*.md"):
+        # surrogateescape round-trips bytes that are not UTF-8 instead of failing the run
+        text = md.read_text(encoding="utf-8", errors="surrogateescape")
+        moved = repoint(text, run_id, new.name)
+        if moved != text:
+            md.write_text(moved, encoding="utf-8", errors="surrogateescape")
+    log(f"renamed {_rel(config, run_dir)} to {_rel(config, new)}")
+    return new
 
 
 def _clean_ignored(config: Config, run_dir: Path, log=print) -> None:

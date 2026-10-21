@@ -65,6 +65,36 @@ class Render(unittest.TestCase):
         with self.assertRaises(ValueError):
             run.chat_command("gemini", "r1", "m", "high")
 
+    def test_chat_command_points_at_a_renamed_directory(self):
+        line = run.chat_command("claude", "20260923-1449-claude", "m", "xhigh", "20260923-1449-claude-fix-it")
+        self.assertTrue(line.startswith("gh pr checkout run/20260923-1449-claude && "), line)
+        self.assertIn("This is remainderbot run 20260923-1449-claude. Read runs/20260923-1449-claude-fix-it/README.md", line)
+        self.assertIn("the log under runs/20260923-1449-claude-fix-it/log/", line)
+
+    def test_title_slug(self):
+        self.assertEqual(run.title_slug("Fake done"), "fake-done")
+        self.assertEqual(run.title_slug("Fix `--ink-3` on `--paper`: contrast"), "fix-ink-3-on-paper-contrast")
+        self.assertEqual(run.title_slug("Café — naïve résumé"), "cafe-naive-resume")
+        for title in ("", "   ", "???", "—"):
+            self.assertEqual(run.title_slug(title), "", title)
+
+    def test_title_slug_cuts_at_a_word_boundary(self):
+        title = "Harness/technique synthesis: which agent setup choices actually matter for a given org's tasks?"
+        self.assertEqual(run.title_slug(title), "harness-technique-synthesis-which-agent")
+        self.assertEqual(run.title_slug("word " * 20, max_len=10), "word-word")
+        self.assertEqual(run.title_slug("abcd efgh", max_len=4), "abcd")  # the cut falls on the boundary itself
+        self.assertEqual(run.title_slug("a" * 60), "a" * 40)  # one long word: cut it
+
+    def test_repoint(self):
+        text = ("See runs/20260912-1200-codex/artifact.patch, `runs/20260912-1200-codex`, and "
+                "/srv/remainderbot/runs/20260912-1200-codex/log/. Not runs/20260912-1200-codex-other/, "
+                "runs/20260912-1200-codex2/, or run 20260912-1200-codex.")
+        moved = run.repoint(text, "20260912-1200-codex", "20260912-1200-codex-fix-it")
+        self.assertEqual(moved, "See runs/20260912-1200-codex-fix-it/artifact.patch, `runs/20260912-1200-codex-fix-it`, and "
+                         "/srv/remainderbot/runs/20260912-1200-codex-fix-it/log/. Not runs/20260912-1200-codex-other/, "
+                         "runs/20260912-1200-codex2/, or run 20260912-1200-codex.")
+        self.assertEqual(run.repoint(moved, "20260912-1200-codex", "20260912-1200-codex-fix-it"), moved)
+
     def test_quota_wall(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:

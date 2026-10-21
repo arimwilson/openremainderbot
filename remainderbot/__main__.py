@@ -79,7 +79,7 @@ def cmd_run(config: Config, args) -> int:
     log(f"run {result.id}: branch {result.branch}, outcome={result.outcome}, finalized={result.finalized}, "
         f"exit={result.exit_code}, timed_out={result.timed_out}, readme={result.readme_exists}")
     if args.publish:
-        url = publish_mod.pr(result.run_dir, config, log)
+        url = publish_mod.pr(result.id, config, log)
         return 0 if url else 1
     return 0 if result.readme_exists else 1
 
@@ -211,7 +211,7 @@ def _tick(config: Config, args) -> int:
         run_mod.git(config, "commit", "-q", "-m", f"tick: {decision.provider} run {result.id} ended {result.outcome}")
 
         # phase 7: publish; on failure the run is remembered in state.json and retried next tick
-        url = publish_mod.pr(result.run_dir, config, log)
+        url = publish_mod.pr(result.id, config, log)
         if url is None:
             log(f"publish: failed; branch {result.branch} is committed locally and will be retried")
             break
