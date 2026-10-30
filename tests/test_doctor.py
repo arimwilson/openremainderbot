@@ -125,6 +125,21 @@ class Doctor(unittest.TestCase):
         self.assertIn("example/remainderbot is public; the bot will not push there", fail["origin"])
         self.assertTrue(fail["push"].startswith("git push --dry-run: "), fail["push"])
 
+    def test_origin_line_names_no_credentials(self):
+        self.git("remote", "set-url", "origin", "https://user:hunter/2+x@github.com/you/bot.git")
+        with mock.patch.dict(os.environ, {"FAKE_GH_FAIL": "1"}):
+            out = {what: (status, detail) for status, what, detail in doctor._origin(self.config)}
+        self.assertEqual(sorted(out), ["origin", "push"], out)
+        status, detail = out["origin"]
+        self.assertEqual(status, doctor.FAIL)
+        self.assertTrue(detail.startswith("cannot tell whether https://github.com/you/bot.git is private"), detail)
+        # git's own error quotes the URL, and git hides a password only when it has no "/"
+        status, detail = out["push"]
+        self.assertEqual(status, doctor.FAIL)
+        self.assertIn("https://github.com/you/bot.git", detail)
+        for status, detail in out.values():
+            self.assertNotIn("hunter/2", detail)
+
     def test_missing_or_example_files_fail(self):
         shutil.copy(doctor.GOALS_EXAMPLE, self.repo / "GOALS.md")
         shutil.copy(doctor.SOURCES_EXAMPLE, self.repo / "sources.toml")

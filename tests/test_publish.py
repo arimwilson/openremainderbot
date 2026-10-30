@@ -242,8 +242,32 @@ class Publish(unittest.TestCase):
     def test_origin_url_drops_credentials(self):
         self.git("remote", "set-url", "origin", "https://x-access-token:secret@github.com/you/bot.git")
         self.assertEqual(origin.url(self.config), "https://github.com/you/bot.git")
+        self.git("remote", "set-url", "origin", "https://user:hunter/2+x@github.com/you/bot.git")
+        self.assertEqual(origin.url(self.config), "https://github.com/you/bot.git")
+        self.git("remote", "set-url", "origin", "https://user:hunter@2@github.com/you/bot.git")
+        self.assertEqual(origin.url(self.config), "https://github.com/you/bot.git")
         self.git("remote", "set-url", "origin", "git@github.com:you/bot.git")
         self.assertEqual(origin.url(self.config), "git@github.com:you/bot.git")
+
+    def test_refusal_names_no_credentials(self):
+        """The PublicRepoError text goes to the tick log; with two push URLs it names each one."""
+        self.git("remote", "set-url", "origin", "https://user:hunter/2+x@github.com/you/bot.git")
+        self.git("remote", "set-url", "--add", "--push", "origin", "https://user:hunter/2+x@github.com/you/bot.git")
+        self.git("remote", "set-url", "--add", "--push", "origin", "https://user:hunter@2@github.com/you/mirror.git")
+        with mock.patch.dict(os.environ, {"FAKE_GH_FAIL": "1"}), mock.patch.object(origin, "_allowed", set()):
+            with self.assertRaises(origin.PublicRepoError) as e:
+                origin.check(self.config)
+        self.assertIn("https://github.com/you/bot.git, one of origin's 2 push URLs,", str(e.exception))
+        self.assertNotIn("hunter/2", str(e.exception))
+        self.assertNotIn("user", str(e.exception))
+
+    def test_failed_push_log_names_no_credentials(self):
+        """git hides a password in its errors, but not one with a "/" in it."""
+        self.git("remote", "set-url", "origin", "https://user:hunter/2+x@github.com/you/bot.git")
+        self.assertFalse(publish.push(self.config, "main", self.logs.append))
+        self.assertTrue(self.logs[-1].startswith("push main failed: "), self.logs)
+        self.assertIn("https://github.com/you/bot.git", self.logs[-1])
+        self.assertNotIn("hunter/2", self.logs[-1])
 
     def test_sync_gh_failure_raises(self):
         with mock.patch.dict(os.environ, {"FAKE_GH_FAIL": "1"}):

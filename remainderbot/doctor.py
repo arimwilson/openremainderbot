@@ -184,7 +184,7 @@ def _origin(config: Config):
                                    f"(a fork of a public repo cannot be: push a clone to a new private repo), "
                                    f"or set ALLOW_PUBLIC_REPO=1")
     code, output = _run(["git", "-C", str(config.repo_dir), "push", "--dry-run", "-q", "origin", f"HEAD:{PROBE_REF}"])
-    yield (OK, "push", "origin accepts pushes") if code == 0 else (FAIL, "push", f"git push --dry-run: {_last(output)}")
+    yield (OK, "push", "origin accepts pushes") if code == 0 else (FAIL, "push", f"git push --dry-run: {origin.redact(_last(output))}")
 
 
 def _upstream(config: Config):
@@ -193,7 +193,7 @@ def _upstream(config: Config):
         return
     code, output = _run(["git", "-C", str(config.repo_dir), "fetch", "-q", "upstream", "main"])
     if code != 0:
-        yield WARN, "upstream", f"fetch failed: {_last(output)}"
+        yield WARN, "upstream", f"fetch failed: {origin.redact(_last(output))}"
         return
     behind = int(git(config, "rev-list", "--count", "HEAD..FETCH_HEAD").strip())
     if behind:

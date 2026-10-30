@@ -22,7 +22,9 @@ from .config import Config
 from .run import git
 
 ALLOWED_VISIBILITY = ("PRIVATE", "INTERNAL")
-_CREDENTIALS_RE = re.compile(r"^(https?://)[^/@]*@")
+_HTTP_URL_RE = re.compile(r"^(https?://)(.*)$", re.IGNORECASE | re.DOTALL)
+# an http(s) URL's user:password@ in a line of output: git quotes the URL in its own errors
+_CREDENTIALS_IN_TEXT_RE = re.compile(r"(https?://)[^\s'\"]*@", re.IGNORECASE)
 # push URLs that gh said are private or internal, in this process
 _allowed: set[str] = set()
 
@@ -35,7 +37,25 @@ def push_urls(config: Config) -> list[str]:
     """Every URL `git push origin` pushes to, without any credentials in them. Raises
     RuntimeError if there is no origin."""
     out = git(config, "remote", "get-url", "--push", "--all", "origin")
-    return [_CREDENTIALS_RE.sub(r"\1", line.strip()) for line in out.splitlines() if line.strip()]
+    return [strip_credentials(line.strip()) for line in out.splitlines() if line.strip()]
+
+
+def strip_credentials(repo_url: str) -> str:
+    """repo_url without the `user:password@` an http(s) URL can carry. A token or password
+    can hold an unencoded "/" or "@", so everything up to the last "@" goes: the host
+    never contains one, and neither do GitHub owner or repo names. Other URLs (scp-style
+    `git@host:path`, `ssh://`, local paths) carry no password and come back unchanged."""
+    m = _HTTP_URL_RE.match(repo_url)
+    if not m:
+        return repo_url
+    scheme, rest = m.groups()
+    return scheme + rest.rpartition("@")[2]
+
+
+def redact(text: str) -> str:
+    """text with the credentials of every http(s) URL in it dropped, for output from git
+    about origin. git hides a password itself, but not one with an unencoded "/" in it."""
+    return _CREDENTIALS_IN_TEXT_RE.sub(r"\1", text)
 
 
 def url(config: Config) -> str:

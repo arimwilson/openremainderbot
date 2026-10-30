@@ -68,7 +68,7 @@ def _git_remote(config: Config, what: str, *args: str, log=print) -> bool:
     """A push or pull that may fail (no remote, no network); logged, not fatal."""
     p = subprocess.run(["git", "-C", str(config.repo_dir), *args], capture_output=True, text=True)
     if p.returncode != 0:
-        err = _git_error("\n".join((p.stderr, p.stdout)))
+        err = origin.redact(_git_error("\n".join((p.stderr, p.stdout))))
         log(f"{what} failed: {err}")
         return False
     return True
