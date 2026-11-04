@@ -250,6 +250,10 @@ def _iso_to_unix(s: str) -> int:
 
 def parse_claude(body: dict) -> Usage:
     fh, wk = body.get("five_hour"), body.get("seven_day")
+    if fh is None and "five_hour" in body:
+        # "five_hour": null (seen since 2026-10-31, with only weekly entries in "limits") means
+        # the account has no 5-hour limit, so it can never be the binding one
+        fh = {"utilization": 0.0, "resets_at": None}
     if not fh or not wk:
         raise UsageError(f"claude: missing five_hour/seven_day in {body!r:.200}")
     try:

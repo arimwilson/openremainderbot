@@ -42,7 +42,7 @@ Both CLIs expose the same two windows: a ~5-hour window and a weekly window, eac
 **Claude** — `usage.claude()` calls `GET https://api.anthropic.com/api/oauth/usage`
 with `Authorization: Bearer <access token>` and `anthropic-beta: oauth-2025-04-20`. The
 response has `five_hour` and `seven_day`, each with `utilization` (0–100) and `resets_at`
-(ISO 8601). On Linux the token lives in `~/.claude/.credentials.json`
+(ISO 8601). An account with no 5-hour limit gets `"five_hour": null`, read as 0% used. On Linux the token lives in `~/.claude/.credentials.json`
 (`claudeAiOauth.accessToken`); Claude Code refreshes it whenever it runs, so a 401 means the
 bot has not run the CLI in a while and `usage.claude()` runs it once and retries (7). This endpoint is
 what community status-line and menu-bar tools use, but it is not an official API and it

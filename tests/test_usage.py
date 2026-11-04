@@ -104,6 +104,17 @@ class ParseClaude(unittest.TestCase):
         self.assertEqual(u.five_hour, usage.Window(0.0, None))
         self.assertEqual(u.weekly.used_pct, 9.0)
 
+    def test_null_five_hour_means_no_five_hour_limit(self):
+        body = {**BODY, "five_hour": None}
+        u = usage.parse_claude(body)
+        self.assertEqual(u.five_hour, usage.Window(0.0, None))
+        self.assertEqual(u.weekly.used_pct, 9.0)
+
+    def test_absent_five_hour_is_still_a_usage_error(self):
+        body = {k: v for k, v in BODY.items() if k != "five_hour"}
+        with self.assertRaises(usage.UsageError):
+            usage.parse_claude(body)
+
     def test_null_weekly_reset_is_a_usage_error(self):
         body = {**BODY, "seven_day": {"utilization": 9.0, "resets_at": None}}
         with self.assertRaises(usage.UsageError):
