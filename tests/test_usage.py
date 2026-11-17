@@ -1,9 +1,13 @@
 """usage.claude(): a 401 with a stored token triggers one CLI refresh and one retry."""
+import json
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from remainderbot import usage
+
+FIX = Path(__file__).parent / "fixtures"
 
 BODY = {
     "five_hour": {"utilization": 11.0, "resets_at": "2026-09-23T20:30:00Z"},
@@ -95,6 +99,38 @@ class RefreshCommand(unittest.TestCase):
         done = mock.Mock(returncode=0, stdout="ok\n", stderr="")
         with mock.patch.object(usage.subprocess, "run", return_value=done):
             usage.refresh_claude_token()
+
+
+class ParseCodex(unittest.TestCase):
+    PRO = json.loads((FIX / "codex_ratelimits_pro.json").read_text())
+
+    def test_weekly_only_plan_has_no_five_hour_limit(self):
+        # Pro: the weekly window sits in "primary" and "secondary" is null
+        u = usage.parse_codex(self.PRO)
+        self.assertEqual(u.plan, "prolite")
+        self.assertEqual(u.weekly, usage.Window(4.0, 1795546538))
+        self.assertEqual(u.five_hour, usage.Window(0.0, None))
+        self.assertEqual(usage.Usage.from_dict(u.to_dict()), u)
+
+    def test_windows_are_told_apart_by_length_not_slot(self):
+        rl = {"primary": {"usedPercent": 7, "windowDurationMins": 10080, "resetsAt": 200},
+              "secondary": {"usedPercent": 30, "windowDurationMins": 300, "resetsAt": 100}}
+        u = usage.parse_codex({"rateLimits": rl})
+        self.assertEqual(u.weekly, usage.Window(7.0, 200))
+        self.assertEqual(u.five_hour, usage.Window(30.0, 100))
+
+    def test_no_weekly_window_is_a_usage_error(self):
+        only_short = {"primary": {"usedPercent": 3, "windowDurationMins": 300, "resetsAt": 100},
+                      "secondary": None}
+        for rl in (only_short, {"primary": None, "secondary": None}, {}):
+            with self.assertRaises(usage.UsageError):
+                usage.parse_codex({"rateLimits": rl})
+
+    def test_malformed_window_is_a_usage_error(self):
+        rl = {"primary": {"windowDurationMins": 10080, "resetsAt": None, "usedPercent": 4},
+              "secondary": None}
+        with self.assertRaises(usage.UsageError):
+            usage.parse_codex({"rateLimits": rl})
 
 
 class ParseClaude(unittest.TestCase):

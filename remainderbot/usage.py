@@ -24,7 +24,7 @@ class UsageError(Exception):
 @dataclass(frozen=True)
 class Window:
     used_pct: float
-    resets_at: int | None  # unix seconds; None while Claude's 5h window is idle
+    resets_at: int | None  # unix seconds; None for an idle 5h window or a plan with no 5h limit
 
     @property
     def remaining_pct(self) -> float:
@@ -108,17 +108,30 @@ def codex(timeout: float = 30) -> Usage:
     return parse_codex(result)
 
 
+WEEK_MINS = 7 * 24 * 60
+
+
 def parse_codex(result: dict) -> Usage:
     rl = result.get("rateLimits") or {}
-    primary, secondary = rl.get("primary"), rl.get("secondary")
-    if not primary or not secondary:
-        raise UsageError(f"codex: missing primary/secondary windows in {result!r:.200}")
-    return Usage(
-        provider="codex",
-        plan=rl.get("planType"),
-        five_hour=Window(float(primary["usedPercent"]), int(primary["resetsAt"])),
-        weekly=Window(float(secondary["usedPercent"]), int(secondary["resetsAt"])),
-    )
+    # The slots don't name the windows. A plan with both limits has the 5-hour one in primary
+    # and the weekly one in secondary; a plan with no 5-hour limit (Pro, planType "prolite",
+    # seen 2026-11-17) has the weekly one in primary and "secondary": null. Go by length.
+    windows = [w for w in (rl.get("primary"), rl.get("secondary")) if w]
+    try:
+        weekly = next((w for w in windows if w.get("windowDurationMins") == WEEK_MINS), None)
+        if weekly is None:
+            raise UsageError(f"codex: no weekly window in {result!r:.200}")
+        short = next((w for w in windows if w is not weekly), None)
+        return Usage(
+            provider="codex",
+            plan=rl.get("planType"),
+            # no shorter window means no 5-hour limit, so it can never be the binding one
+            five_hour=(Window(float(short["usedPercent"]), int(short["resetsAt"])) if short
+                       else Window(0.0, None)),
+            weekly=Window(float(weekly["usedPercent"]), int(weekly["resetsAt"])),
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as e:
+        raise UsageError(f"codex: unexpected rateLimits shape: {e}") from e
 
 
 # --- Claude -------------------------------------------------------------------
