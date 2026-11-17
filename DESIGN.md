@@ -36,8 +36,11 @@ Both CLIs expose the same two windows: a ~5-hour window and a weekly window, eac
 
 **Codex** — `usage.codex()` spawns `codex app-server` on stdio, sends `initialize`,
 `initialized`, then `account/rateLimits/read`. The response has `rateLimits.primary`
-(300 min) and `rateLimits.secondary` (10080 min), each with `usedPercent` and `resetsAt`
-(unix seconds). Codex owns auth; nothing to copy.
+(300 min) and `rateLimits.secondary` (10080 min), each with `windowDurationMins`,
+`usedPercent` and `resetsAt` (unix seconds). A plan with no 5-hour limit (Pro, `planType`
+`prolite`) has the weekly window in `primary` and `"secondary": null`, so the windows are
+told apart by `windowDurationMins`, and a missing 5-hour window is read as 0% used. Codex
+owns auth; nothing to copy.
 
 **Claude** — `usage.claude()` calls `GET https://api.anthropic.com/api/oauth/usage`
 with `Authorization: Bearer <access token>` and `anthropic-beta: oauth-2025-04-20`. The
