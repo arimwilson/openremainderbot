@@ -47,7 +47,7 @@ class Config:
     agent_full_access: bool = True
     claude_model: str = "claude-opus-5-5"
     claude_fallback_model: str = "claude-sonnet-5-5"
-    codex_model: str = "gpt-6-astra"
+    codex_model: str = "gpt-6.2-astra"
     # what the snapshot reads; a relative path is relative to repo_dir
     sources_file: str = "sources.toml"
     # pushing to a public origin publishes every snapshot and agent log (origin.py)
@@ -70,7 +70,7 @@ class Config:
             agent_full_access=_env_bool("AGENT_FULL_ACCESS", True),
             claude_model=os.environ.get("CLAUDE_MODEL", "claude-opus-5-5"),
             claude_fallback_model=os.environ.get("CLAUDE_FALLBACK_MODEL", "claude-sonnet-5-5"),
-            codex_model=os.environ.get("CODEX_MODEL", "gpt-6-astra"),
+            codex_model=os.environ.get("CODEX_MODEL", "gpt-6.2-astra"),
             sources_file=os.environ.get("SOURCES_FILE") or "sources.toml",
             allow_public_repo=_env_bool("ALLOW_PUBLIC_REPO", False),
             log_max_bytes=_env_int("LOG_MAX_BYTES", 5 * 1024 * 1024),

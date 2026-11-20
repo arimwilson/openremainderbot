@@ -250,7 +250,7 @@ within its first few minutes containing:
    is the sandbox (a dedicated server; README.md, "Security"):
    - Claude: `claude -p --model claude-opus-5-5 --effort <effort> --dangerously-skip-permissions
      --output-format stream-json --verbose` (must run as a non-root user).
-   - Codex: `codex exec -m gpt-6-astra -c model_reasoning_effort="<effort>"
+   - Codex: `codex exec -m gpt-6.2-astra -c model_reasoning_effort="<effort>"
      --dangerously-bypass-approvals-and-sandbox -C <repo> --json
      -o runs/<id>/log/last.txt -`.
    Model and effort per size are in 4.4.
@@ -307,7 +307,7 @@ subscription at high effort, dropping to a lower effort only when the deadline i
 
 | | Claude | Codex |
 |---|---|---|
-| Model | `--model claude-opus-5-5` (Claude Opus 5.5, pinned by ID since the `opus` alias may lag; `--fallback-model claude-sonnet-5-5` for overload, also pinned since the `sonnet` alias resolved to Sonnet 5) | `-m gpt-6-astra` (the account's default) |
+| Model | `--model claude-opus-5-5` (Claude Opus 5.5, pinned by ID since the `opus` alias may lag; `--fallback-model claude-sonnet-5-5` for overload, also pinned since the `sonnet` alias resolved to Sonnet 5) | `-m gpt-6.2-astra` |
 | Effort, size `small` | `--effort high` | `-c model_reasoning_effort="high"` |
 | Effort, `medium` / `large` | `--effort xhigh` | `-c model_reasoning_effort="xhigh"` |
 | Effort, finalize pass | `--effort medium` | `-c model_reasoning_effort="medium"` |

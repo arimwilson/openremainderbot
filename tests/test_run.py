@@ -50,11 +50,11 @@ class Render(unittest.TestCase):
                          ["claude", "--model", "claude-opus-5-5", "--effort", "xhigh"])
 
     def test_chat_command_codex_quotes_the_toml_override(self):
-        line = run.chat_command("codex", "20260919-1200-codex", "gpt-6-astra", "xhigh")
-        self.assertTrue(line.startswith("gh pr checkout run/20260919-1200-codex && codex -m gpt-6-astra "
+        line = run.chat_command("codex", "20260919-1200-codex", "gpt-6.2-astra", "xhigh")
+        self.assertTrue(line.startswith("gh pr checkout run/20260919-1200-codex && codex -m gpt-6.2-astra "
                                         "-c 'model_reasoning_effort=\"xhigh\"' 'This is remainderbot run"))
         self.assertEqual(shlex.split(line.split(" && ", 1)[1])[:5],
-                         ["codex", "-m", "gpt-6-astra", "-c", 'model_reasoning_effort="xhigh"'])
+                         ["codex", "-m", "gpt-6.2-astra", "-c", 'model_reasoning_effort="xhigh"'])
 
     def test_chat_section_uses_the_configured_model(self):
         cfg = Config(repo_dir=Path("/r"), claude_model="claude-x", codex_model="gpt-x")

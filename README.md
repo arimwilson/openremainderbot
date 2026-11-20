@@ -341,7 +341,7 @@ Environment variables, set on the crontab line or as `NAME=value` lines above it
 | `RUN_DISABLED`                 | unset                               | log the decision and stop without claiming the period                                                                   |
 | `ALLOW_PUBLIC_REPO`            | unset                               | push and open PRs even when `origin` is public                                                                          |
 | `AGENT_FULL_ACCESS`            | 1                                   | pass the bypass-permissions flags to the CLI; with 0, Codex's sandbox makes `.git` read-only and the run's commits fail |
-| `CLAUDE_MODEL` / `CODEX_MODEL` | `claude-opus-5-5` / `gpt-6-astra`   | models ([DESIGN.md §4.4](DESIGN.md#44-models-effort-and-cli-settings))                                                  |
+| `CLAUDE_MODEL` / `CODEX_MODEL` | `claude-opus-5-5` / `gpt-6.2-astra` | models ([DESIGN.md §4.4](DESIGN.md#44-models-effort-and-cli-settings))                                                  |
 | `CLAUDE_FALLBACK_MODEL`        | `claude-sonnet-5-5`                 | `--fallback-model` for Claude; empty to omit the flag                                                                   |
 | `CLAUDE_OAUTH_TOKEN`           | unset                               | overrides `~/.claude/.credentials.json` and the macOS keychain                                                          |
 | `CLAUDE_REFRESH_MODEL`         | `haiku`                             | model for the one-shot `claude -p` that refreshes a stored token after a 401                                            |
